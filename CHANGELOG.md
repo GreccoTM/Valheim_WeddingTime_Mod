@@ -9,3 +9,4 @@
 - Marriages are now saved on the server only after both partners confirm, so a client can no longer marry another player alone. Players already married are rejected.
 - The bond refreshes immediately on equip/unequip; the background check runs every 2 s instead of every 1 s.
 - Skill bonus only applies to the local player's own Skills; cached reflection lookups; less log noise.
+- Dedicated servers: marriage confirmation and level-up celebrations now resolve players through the peer roster, so they work for characters the server has not loaded nearby (previously the celebration could use the world origin and a placeholder name).

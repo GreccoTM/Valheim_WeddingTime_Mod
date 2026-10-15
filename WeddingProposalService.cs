@@ -149,14 +149,14 @@ namespace WeddingTime
 
             var first = package.ReadLong();
             var second = package.ReadLong();
-            var sender = FindPlayerByPeerId(senderPeerId);
-            if (sender == null || (sender.GetPlayerID() != first && sender.GetPlayerID() != second))
+            var senderPlayerId = WeddingProgression.GetPlayerIdForPeer(senderPeerId);
+            if (senderPlayerId == 0 || (senderPlayerId != first && senderPlayerId != second))
             {
                 Plugin.ModLogger.LogWarning($"Rejected marriage persistence request from peer {senderPeerId}: sender is not part of the requested pair.");
                 yield break;
             }
 
-            ConfirmMarriage(sender.GetPlayerID(), Math.Min(first, second), Math.Max(first, second));
+            ConfirmMarriage(senderPlayerId, Math.Min(first, second), Math.Max(first, second));
         }
 
         private static void ConfirmMarriage(long confirmingPlayerId, long first, long second)

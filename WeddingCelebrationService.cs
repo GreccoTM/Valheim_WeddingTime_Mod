@@ -28,13 +28,14 @@ namespace WeddingTime
         {
             if (ZNet.instance == null || !ZNet.instance.IsServer() || _levelUpRpc == null) return;
 
-            var players = Player.GetAllPlayers().Where(player => player != null).ToList();
-            var first = players.FirstOrDefault(player => player.GetPlayerID() == firstPlayerId);
-            var second = players.FirstOrDefault(player => player.GetPlayerID() == secondPlayerId);
-            var firstName = first != null ? first.GetPlayerName() : $"Player {firstPlayerId}";
-            var secondName = second != null ? second.GetPlayerName() : $"Player {secondPlayerId}";
-            var firstPosition = first != null ? first.transform.position : Vector3.zero;
-            var secondPosition = second != null ? second.transform.position : Vector3.zero;
+            if (!WeddingProgression.TryGetOnlinePlayer(firstPlayerId, out var firstName, out var firstPosition))
+            {
+                firstName = $"Player {firstPlayerId}";
+            }
+            if (!WeddingProgression.TryGetOnlinePlayer(secondPlayerId, out var secondName, out var secondPosition))
+            {
+                secondName = $"Player {secondPlayerId}";
+            }
 
             ShowCelebration(firstName, secondName, level, firstPosition, secondPosition);
 

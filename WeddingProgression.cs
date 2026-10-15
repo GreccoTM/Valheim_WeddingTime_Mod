@@ -96,6 +96,51 @@ namespace WeddingTime
                 && item.m_crafterID == partnerId);
         }
 
+        // A dedicated server only has Player objects for characters near it, so resolve
+        // connected characters through the peer roster as well.
+        internal static bool TryGetOnlinePlayer(long playerId, out string name, out Vector3 position)
+        {
+            name = null;
+            position = Vector3.zero;
+            var player = Player.GetAllPlayers()?.FirstOrDefault(candidate => candidate != null && candidate.GetPlayerID() == playerId);
+            if (player != null)
+            {
+                name = player.GetPlayerName();
+                position = player.transform.position;
+                return true;
+            }
+
+            var peer = FindPeerByPlayerId(playerId);
+            if (peer == null) return false;
+            name = peer.m_playerName;
+            position = peer.m_refPos;
+            return true;
+        }
+
+        internal static long GetPlayerIdForPeer(long peerId)
+        {
+            var player = Player.GetAllPlayers()?.FirstOrDefault(candidate => candidate != null && candidate.GetZDOID().UserID == peerId);
+            if (player != null) return player.GetPlayerID();
+
+            var peer = ZNet.instance?.GetPeer(peerId);
+            if (peer == null || peer.m_characterID.IsNone() || ZDOMan.instance == null) return 0;
+            var character = ZDOMan.instance.GetZDO(peer.m_characterID);
+            return character != null ? character.GetLong(ZDOVars.s_playerID, 0L) : 0;
+        }
+
+        private static ZNetPeer FindPeerByPlayerId(long playerId)
+        {
+            var peers = ZNet.instance?.GetPeers();
+            if (peers == null || ZDOMan.instance == null) return null;
+            foreach (var peer in peers)
+            {
+                if (peer == null || peer.m_characterID.IsNone()) continue;
+                var character = ZDOMan.instance.GetZDO(peer.m_characterID);
+                if (character != null && character.GetLong(ZDOVars.s_playerID, 0L) == playerId) return peer;
+            }
+            return null;
+        }
+
         internal static bool IsMarried(long playerId)
         {
             if (ZoneSystem.instance == null) return false;
