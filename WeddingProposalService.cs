@@ -13,6 +13,7 @@ namespace WeddingTime
         private const string ProposalRpcName = "MarriageProposal";
         private const string ResponseRpcName = "MarriageProposalResponse";
         private const string PersistMarriageRpcName = "PersistMarriage";
+        private const string MarriageRejectedRpcName = "MarriageRejected";
         private const string MarriageKeyPrefix = "weddingtime_married_";
         private const float ProposalRange = 5f;
         private const float ProposalLifetime = 120f;
@@ -20,6 +21,7 @@ namespace WeddingTime
         private static CustomRPC _proposalRpc;
         private static CustomRPC _responseRpc;
         private static CustomRPC _persistMarriageRpc;
+        private static CustomRPC _marriageRejectedRpc;
         private static PendingProposal _outgoing;
         private static PendingProposal _incoming;
         private static long _loadedWorldUid;
@@ -41,6 +43,7 @@ namespace WeddingTime
             _proposalRpc = NetworkManager.Instance.AddRPC(ProposalRpcName, RPC_ReceiveProposal, RPC_ReceiveProposal);
             _responseRpc = NetworkManager.Instance.AddRPC(ResponseRpcName, RPC_ReceiveResponse, RPC_ReceiveResponse);
             _persistMarriageRpc = NetworkManager.Instance.AddRPC(PersistMarriageRpcName, RPC_ReceivePersistMarriage, RPC_ReceivePersistMarriage);
+            _marriageRejectedRpc = NetworkManager.Instance.AddRPC(MarriageRejectedRpcName, RPC_IgnoreClientRequest, RPC_ReceiveMarriageRejected);
             Plugin.ModLogger.LogInfo("Marriage proposal and persistence CustomRPC handlers registered through Jotunn.");
         }
 
@@ -164,6 +167,8 @@ namespace WeddingTime
             if (WeddingProgression.IsMarried(first) || WeddingProgression.IsMarried(second))
             {
                 Plugin.ModLogger.LogWarning($"Rejected marriage {first}/{second}: one of the players is already married.");
+                NotifyMarriageRejected(first, second, "one of you is already married.");
+                NotifyMarriageRejected(second, first, "one of you is already married.");
                 return;
             }
 
@@ -426,6 +431,56 @@ namespace WeddingTime
             {
                 Chat.instance.AddString(text);
             }
+        }
+
+        // Server only: tell a client its optimistic engagement was not accepted.
+        private static void NotifyMarriageRejected(long playerId, long partnerId, string reason)
+        {
+            var localPlayer = Player.m_localPlayer;
+            if (localPlayer != null && localPlayer.GetPlayerID() == playerId)
+            {
+                HandleMarriageRejected(partnerId, reason);
+                return;
+            }
+
+            if (_marriageRejectedRpc == null || !WeddingProgression.TryGetPeerIdForPlayer(playerId, out var peerId)) return;
+
+            var package = new ZPackage();
+            package.Write(partnerId);
+            package.Write(reason);
+            _marriageRejectedRpc.SendPackage(peerId, package);
+        }
+
+        private static IEnumerator RPC_IgnoreClientRequest(long senderPeerId, ZPackage package)
+        {
+            yield return null;
+            Plugin.ModLogger.LogWarning($"Ignored client-originated marriage rejection RPC from peer {senderPeerId}.");
+        }
+
+        private static IEnumerator RPC_ReceiveMarriageRejected(long senderPeerId, ZPackage package)
+        {
+            yield return null;
+            if (ZNet.instance == null || ZNet.instance.IsServer()) yield break;
+
+            try
+            {
+                var partnerId = package.ReadLong();
+                var reason = package.ReadString();
+                HandleMarriageRejected(partnerId, reason);
+            }
+            catch (Exception exception)
+            {
+                Plugin.ModLogger.LogWarning($"Could not process marriage rejection: {exception.Message}");
+            }
+        }
+
+        private static void HandleMarriageRejected(long partnerId, string reason)
+        {
+            if (EngagedPartnerId != partnerId) return;
+
+            EngagedPartnerId = 0;
+            EngagedPartnerName = string.Empty;
+            ShowMessage($"The marriage could not be completed: {reason}");
         }
 
         private sealed class PendingMarriage

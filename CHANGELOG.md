@@ -10,3 +10,4 @@
 - The bond refreshes immediately on equip/unequip; the background check runs every 2 s instead of every 1 s.
 - Skill bonus only applies to the local player's own Skills; cached reflection lookups; less log noise.
 - Dedicated servers: marriage confirmation and level-up celebrations now resolve players through the peer roster, so they work for characters the server has not loaded nearby (previously the celebration could use the world origin and a placeholder name).
+- If the server rejects a marriage (for example one partner is already married), both clients now clear the local engagement and show a message instead of staying engaged until relog.

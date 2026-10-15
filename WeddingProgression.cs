@@ -128,6 +128,13 @@ namespace WeddingTime
             return character != null ? character.GetLong(ZDOVars.s_playerID, 0L) : 0;
         }
 
+        internal static bool TryGetPeerIdForPlayer(long playerId, out long peerId)
+        {
+            var peer = FindPeerByPlayerId(playerId);
+            peerId = peer != null ? peer.m_uid : 0;
+            return peer != null;
+        }
+
         private static ZNetPeer FindPeerByPlayerId(long playerId)
         {
             var peers = ZNet.instance?.GetPeers();
