@@ -158,11 +158,13 @@ namespace WeddingTime
 
         private IEnumerator ConfigureRingUpgradeWhenObjectDbReady(string prefabName)
         {
-            const int maxAttempts = 120;
-            for (var attempt = 0; attempt < maxAttempts; attempt++)
+            // ObjectDB only exists once a world loads (not at the main menu) and is rebuilt on every
+            // world load, so keep waiting for it for as long as the plugin lives and reapply to each new instance.
+            ObjectDB appliedTo = null;
+            while (true)
             {
                 var database = ObjectDB.instance;
-                if (database != null && database.m_recipes != null)
+                if (database != null && database != appliedTo && database.m_recipes != null)
                 {
                     var recipe = database.m_recipes.Find(candidate => candidate != null
                         && candidate.m_item != null
@@ -192,14 +194,12 @@ namespace WeddingTime
                         });
                         recipe.m_resources = requirements.ToArray();
                         ModLogger.LogInfo($"Wedding Ring upgrade requirements applied to the live ObjectDB recipe: {_upgradeCoinCost.Value} Coins and {_upgradeJadeCost.Value} Jade for quality 2.");
-                        yield break;
+                        appliedTo = database;
                     }
                 }
 
                 yield return new WaitForSeconds(0.5f);
             }
-
-            ModLogger.LogError("Could not find the live Wedding Ring recipe, Coins, or Jade in ObjectDB; the ring upgrade will have no configured material cost.");
         }
 
         internal static void SetDebugMarriage(bool enabled)
