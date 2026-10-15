@@ -172,13 +172,8 @@ namespace WeddingTime
                 return;
             }
 
+            PurgeExpiredMarriages();
             var now = Time.time;
-            foreach (var staleKey in PendingMarriages.Where(entry => now - entry.Value.CreatedAt > ProposalLifetime + 30f)
-                .Select(entry => entry.Key).ToList())
-            {
-                PendingMarriages.Remove(staleKey);
-            }
-
             var pairKey = first + "_" + second;
             if (!PendingMarriages.TryGetValue(pairKey, out var pending))
             {
@@ -430,6 +425,26 @@ namespace WeddingTime
             if (Chat.instance != null)
             {
                 Chat.instance.AddString(text);
+            }
+        }
+
+        // Server only: drop confirmations whose partner never answered and tell whoever did confirm.
+        internal static void PurgeExpiredMarriages()
+        {
+            if (PendingMarriages.Count == 0) return;
+
+            var now = Time.time;
+            foreach (var entry in PendingMarriages.Where(pair => now - pair.Value.CreatedAt > ProposalLifetime + 30f).ToList())
+            {
+                PendingMarriages.Remove(entry.Key);
+                var ids = entry.Key.Split('_');
+                if (ids.Length != 2 || !long.TryParse(ids[0], out var first) || !long.TryParse(ids[1], out var second)) continue;
+
+                foreach (var confirmedId in entry.Value.Confirmed)
+                {
+                    var partnerId = confirmedId == first ? second : first;
+                    NotifyMarriageRejected(confirmedId, partnerId, "your partner did not confirm in time.");
+                }
             }
         }
 

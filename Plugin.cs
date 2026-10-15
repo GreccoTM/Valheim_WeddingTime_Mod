@@ -208,6 +208,7 @@ namespace WeddingTime
             var wait = new WaitForSeconds(2f);
             while (true)
             {
+                if (ZNet.instance != null && ZNet.instance.IsServer()) WeddingProposalService.PurgeExpiredMarriages();
                 WeddingProposalService.RestoreFromWorld();
                 RefreshDebugBuff();
                 yield return wait;
