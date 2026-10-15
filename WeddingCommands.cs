@@ -81,3 +81,46 @@ namespace WeddingTime
         }
     }
 }
+
+namespace WeddingTime
+{
+    internal sealed class DivorceCommand : ConsoleCommand
+    {
+        public override string Name => "divorce";
+        public override string Help => "End your marriage: /divorce, then /divorce confirm. Use /divorce cancel to stop a pending divorce.";
+
+        public override void Run(string[] args, Terminal context)
+        {
+            var action = args.Length == 0 ? string.Empty : args[0].ToLowerInvariant();
+            if (args.Length > 1 || (action != string.Empty && action != "confirm" && action != "cancel"))
+            {
+                context?.AddString("Usage: /divorce | /divorce confirm | /divorce cancel");
+                return;
+            }
+
+            string message;
+            if (action == "confirm") WeddingDivorceService.Confirm(out message);
+            else if (action == "cancel") WeddingDivorceService.Cancel(out message);
+            else WeddingDivorceService.Arm(out message);
+            context?.AddString(message);
+        }
+    }
+
+    internal sealed class AdminDivorceCommand : ConsoleCommand
+    {
+        public override string Name => "wedding_admin_divorce";
+        public override string Help => "Admin only: immediately end the marriage of an online player: wedding_admin_divorce <player name>";
+
+        public override void Run(string[] args, Terminal context)
+        {
+            if (args.Length == 0)
+            {
+                context?.AddString("Usage: wedding_admin_divorce <player name>");
+                return;
+            }
+
+            WeddingDivorceService.AdminDivorce(string.Join(" ", args).Trim(), out var message);
+            context?.AddString(message);
+        }
+    }
+}

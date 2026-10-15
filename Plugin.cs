@@ -33,6 +33,7 @@ namespace WeddingTime
         internal static SE_Stats WeddingBuff { get; private set; }
         internal static bool WeddingBuffEnhanced => _configuredBuffEnhanced;
         internal static ConfigEntry<int> DaysTogetherPerLevel { get; private set; }
+        internal static ConfigEntry<int> DivorceDelaySeconds { get; private set; }
         private static ConfigEntry<int> _upgradeCoinCost;
         private static ConfigEntry<int> _upgradeJadeCost;
         private static readonly MethodInfo UpdateFoodMethod = AccessTools.Method(typeof(Player), "UpdateFood", new[] { typeof(float), typeof(bool) });
@@ -49,6 +50,9 @@ namespace WeddingTime
             DaysTogetherPerLevel = Config.BindConfig("Progression", "DaysTogetherPerLevel", 5,
                 "Shared in-game days the married couple must spend online together to gain each Wedding Bond level. Synced from the server.",
                 true, acceptableValues: new AcceptableValueRange<int>(1, 100));
+            DivorceDelaySeconds = Config.BindConfig("Marriage", "DivorceDelaySeconds", 300,
+                "Seconds between /divorce confirm and the divorce becoming final. Either partner can cancel with /divorce cancel during this time. 0 makes it immediate. Synced from the server.",
+                true, acceptableValues: new AcceptableValueRange<int>(0, 3600));
             _upgradeCoinCost = Config.BindConfig("Upgrade", "CoinCost", 3000,
                 "Coins required to upgrade the Wedding Ring at the Forge. Requires a restart after editing.",
                 false, acceptableValues: new AcceptableValueRange<int>(0, 100000));
@@ -64,6 +68,9 @@ namespace WeddingTime
             CommandManager.Instance.AddConsoleCommand(new IDoCommand());
             CommandManager.Instance.AddConsoleCommand(new IDoNotCommand());
             WeddingProposalService.RegisterRpcs();
+            WeddingDivorceService.RegisterRpcs();
+            CommandManager.Instance.AddConsoleCommand(new DivorceCommand());
+            CommandManager.Instance.AddConsoleCommand(new AdminDivorceCommand());
             WeddingCelebrationService.RegisterRpcs();
             _harmony = new Harmony(PluginGuid);
             _harmony.PatchAll();
@@ -208,7 +215,7 @@ namespace WeddingTime
             var wait = new WaitForSeconds(2f);
             while (true)
             {
-                if (ZNet.instance != null && ZNet.instance.IsServer()) WeddingProposalService.PurgeExpiredMarriages();
+                if (ZNet.instance != null && ZNet.instance.IsServer()) { WeddingProposalService.PurgeExpiredMarriages(); WeddingDivorceService.Tick(); }
                 WeddingProposalService.RestoreFromWorld();
                 RefreshDebugBuff();
                 yield return wait;

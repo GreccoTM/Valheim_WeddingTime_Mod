@@ -415,7 +415,15 @@ namespace WeddingTime
             return Player.GetAllPlayers().FirstOrDefault(player => player != null && player.GetZDOID().UserID == peerId);
         }
 
-        private static void ShowMessage(string text)
+        internal static void ClearEngagement()
+        {
+            EngagedPartnerId = 0;
+            EngagedPartnerName = string.Empty;
+            _incoming = null;
+            _outgoing = null;
+        }
+
+        internal static void ShowMessage(string text)
         {
             if (MessageHud.instance != null)
             {

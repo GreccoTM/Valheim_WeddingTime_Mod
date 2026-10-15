@@ -148,6 +148,44 @@ namespace WeddingTime
             return null;
         }
 
+        internal static bool TryGetPartnerId(long playerId, out long partnerId)
+        {
+            partnerId = 0;
+            if (ZoneSystem.instance == null) return false;
+            foreach (var pair in GetMarriagePairs(ZoneSystem.instance.GetGlobalKeys()))
+            {
+                if (pair.First == playerId) { partnerId = pair.Second; return true; }
+                if (pair.Second == playerId) { partnerId = pair.First; return true; }
+            }
+            return false;
+        }
+
+        // Server only: erase the marriage and all of the couple's saved progress.
+        internal static void RemoveMarriage(long first, long second)
+        {
+            if (ZoneSystem.instance == null || ZNet.instance == null || !ZNet.instance.IsServer()) return;
+
+            var pairKey = MakePairKey(first, second);
+            var progressPrefix = ProgressPrefix + pairKey + "_";
+            foreach (var key in ZoneSystem.instance.GetGlobalKeys().ToList())
+            {
+                if (key == MarriagePrefix + pairKey || key.StartsWith(progressPrefix, StringComparison.Ordinal))
+                {
+                    ZoneSystem.instance.RemoveGlobalKey(key);
+                }
+            }
+
+            SharedSeconds.Remove(pairKey);
+            PersistedSeconds.Remove(pairKey);
+            LastOnlineWorldTime.Remove(pairKey);
+            WaitingForPlayersLog.Remove(pairKey);
+            PlayerLevels.Remove(first);
+            PlayerLevels.Remove(second);
+            PartnerIds.Remove(first);
+            PartnerIds.Remove(second);
+            Plugin.ModLogger.LogInfo($"Removed marriage and Wedding Bond progress for couple {pairKey}.");
+        }
+
         internal static bool IsMarried(long playerId)
         {
             if (ZoneSystem.instance == null) return false;

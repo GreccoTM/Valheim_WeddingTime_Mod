@@ -41,3 +41,10 @@ The Wedding Bond name appears on the first status-icon line, with the current le
 
 - Upgrade the original Wedding Ring at the Forge using the game's quality-upgrade system: 3000 Gold Coins and 1 Jade.
 - The upgraded ring is quality 2, uses a variant inventory icon with red engravings and a Jade stone, and doubles every Wedding Bond effect, including damage resistance, skill bonus, and maximum stats.
+
+## Divorce
+
+- `/divorce` explains the consequences and arms the command for 60 seconds. `/divorce confirm` sends the request to the server.
+- The divorce becomes final after `[Marriage] DivorceDelaySeconds` (default 300, server-synced; 0 = immediate). Either partner can stop it with `/divorce cancel` before then. A pending divorce is held in server memory, so a server restart cancels it.
+- Finalizing a divorce removes the marriage and the couple's shared Wedding Bond progress from the world save and clears the bond on both clients. Rings keep their "Crafted by" name but no longer grant any effect.
+- Server admins can force one with `wedding_admin_divorce <player name>` (the target must be online and nearby enough to be loaded).
