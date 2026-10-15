@@ -1,0 +1,10 @@
+{
+  "name": "WeddingTime",
+  "version_number": "0.5.11",
+  "website_url": "",
+  "description": "Marry another player, craft Wedding Rings and grow a shared Wedding Bond with new perks every level.",
+  "dependencies": [
+    "denikson-BepInExPack_Valheim-5.4.2351",
+    "ValheimModding-Jotunn-2.30.2"
+  ]
+}
