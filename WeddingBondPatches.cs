@@ -60,12 +60,39 @@ namespace WeddingTime
             return AccessTools.Method(typeof(Skills), "GetSkillLevel", new[] { typeof(Skills.SkillType) });
         }
 
-        private static void Postfix(ref float __result)
+        private static void Postfix(Skills __instance, ref float __result)
         {
             var player = Player.m_localPlayer;
+            if (player == null || player.GetSkills() != __instance) return;
+
             if (WeddingProgression.GetLevelForPlayer(player) >= 8 && Plugin.HasWeddingBond(player))
             {
                 __result += Plugin.IsWeddingBondEnhanced(player) ? 50f : 25f;
+            }
+        }
+    }
+}
+
+namespace WeddingTime
+{
+    // Refresh the Wedding Bond as soon as a ring is equipped or removed instead of waiting for the poll.
+    [HarmonyPatch]
+    internal static class WeddingBondEquipPatch
+    {
+        private static IEnumerable<MethodBase> TargetMethods()
+        {
+            foreach (var name in new[] { "EquipItem", "UnequipItem" })
+            {
+                var method = AccessTools.Method(typeof(Humanoid), name);
+                if (method != null) yield return method;
+            }
+        }
+
+        private static void Postfix(Humanoid __instance)
+        {
+            if (__instance != null && __instance == Player.m_localPlayer)
+            {
+                Plugin.RefreshDebugBuff();
             }
         }
     }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Linq;
 using Jotunn.Entities;
 using Jotunn.Managers;
@@ -22,6 +23,10 @@ namespace WeddingTime
         private static PendingProposal _outgoing;
         private static PendingProposal _incoming;
         private static long _loadedWorldUid;
+
+        // Server only: a marriage is saved once BOTH partners have asked for it, so a client
+        // cannot marry another player on its own.
+        private static readonly Dictionary<string, PendingMarriage> PendingMarriages = new Dictionary<string, PendingMarriage>();
 
         internal static long EngagedPartnerId { get; private set; }
         internal static string EngagedPartnerName { get; private set; }
@@ -107,7 +112,8 @@ namespace WeddingTime
 
             if (ZNet.instance != null && ZNet.instance.IsServer())
             {
-                SaveMarriageKey(first, second);
+                var localPlayer = Player.m_localPlayer;
+                if (localPlayer != null) ConfirmMarriage(localPlayer.GetPlayerID(), first, second);
                 return;
             }
 
@@ -150,7 +156,41 @@ namespace WeddingTime
                 yield break;
             }
 
-            SaveMarriageKey(Math.Min(first, second), Math.Max(first, second));
+            ConfirmMarriage(sender.GetPlayerID(), Math.Min(first, second), Math.Max(first, second));
+        }
+
+        private static void ConfirmMarriage(long confirmingPlayerId, long first, long second)
+        {
+            if (WeddingProgression.IsMarried(first) || WeddingProgression.IsMarried(second))
+            {
+                Plugin.ModLogger.LogWarning($"Rejected marriage {first}/{second}: one of the players is already married.");
+                return;
+            }
+
+            var now = Time.time;
+            foreach (var staleKey in PendingMarriages.Where(entry => now - entry.Value.CreatedAt > ProposalLifetime + 30f)
+                .Select(entry => entry.Key).ToList())
+            {
+                PendingMarriages.Remove(staleKey);
+            }
+
+            var pairKey = first + "_" + second;
+            if (!PendingMarriages.TryGetValue(pairKey, out var pending))
+            {
+                pending = new PendingMarriage { CreatedAt = now };
+                PendingMarriages[pairKey] = pending;
+            }
+
+            pending.Confirmed.Add(confirmingPlayerId);
+            if (pending.Confirmed.Contains(first) && pending.Confirmed.Contains(second))
+            {
+                PendingMarriages.Remove(pairKey);
+                SaveMarriageKey(first, second);
+            }
+            else
+            {
+                Plugin.ModLogger.LogInfo($"Waiting for the other partner to confirm marriage {first}/{second}.");
+            }
         }
 
         internal static bool Propose(string targetName, out string message)
@@ -386,6 +426,12 @@ namespace WeddingTime
             {
                 Chat.instance.AddString(text);
             }
+        }
+
+        private sealed class PendingMarriage
+        {
+            internal float CreatedAt;
+            internal readonly HashSet<long> Confirmed = new HashSet<long>();
         }
 
         private sealed class PendingProposal

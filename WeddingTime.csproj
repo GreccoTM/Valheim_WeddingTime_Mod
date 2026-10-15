@@ -5,6 +5,7 @@
     <Nullable>disable</Nullable>
     <AssemblyName>WeddingTime</AssemblyName>
     <RootNamespace>WeddingTime</RootNamespace>
+    <Version>0.5.11</Version>
     <ValheimDir Condition="'$(ValheimDir)' == ''">/mnt/Kingston1Tb/SteamLibrary/steamapps/common/Valheim</ValheimDir>
     <OutputPath>$(MSBuildProjectDirectory)/artifacts/</OutputPath>
   </PropertyGroup>

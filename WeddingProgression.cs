@@ -77,25 +77,30 @@ namespace WeddingTime
 
         internal static bool HasPartnerRingEquipped(Player player)
         {
-            if (player == null || player.GetInventory() == null
-                || !PartnerIds.TryGetValue(player.GetPlayerID(), out var partnerId)) return false;
-
-            return player.GetInventory().GetAllItems().Any(item => item.m_equipped
-                && item.m_dropPrefab != null
-                && item.m_dropPrefab.name == "WeddingTime_Ring"
-                && item.m_crafterID == partnerId);
+            return FindEquippedPartnerRing(player) != null;
         }
 
         internal static bool HasEnhancedPartnerRingEquipped(Player player)
         {
-            if (player == null || player.GetInventory() == null
-                || !PartnerIds.TryGetValue(player.GetPlayerID(), out var partnerId)) return false;
+            var ring = FindEquippedPartnerRing(player);
+            return ring != null && ring.m_quality >= 2;
+        }
 
-            return player.GetInventory().GetAllItems().Any(item => item.m_equipped
-                && item.m_dropPrefab != null
-                && item.m_dropPrefab.name == "WeddingTime_Ring"
-                && item.m_crafterID == partnerId
-                && item.m_quality >= 2);
+        private static ItemDrop.ItemData FindEquippedPartnerRing(Player player)
+        {
+            if (player == null || player.GetInventory() == null
+                || !PartnerIds.TryGetValue(player.GetPlayerID(), out var partnerId)) return null;
+
+            return player.GetInventory().GetAllItems().FirstOrDefault(item => item.m_equipped
+                && Plugin.IsWeddingRing(item)
+                && item.m_crafterID == partnerId);
+        }
+
+        internal static bool IsMarried(long playerId)
+        {
+            if (ZoneSystem.instance == null) return false;
+            return GetMarriagePairs(ZoneSystem.instance.GetGlobalKeys())
+                .Any(pair => pair.First == playerId || pair.Second == playerId);
         }
 
         internal static IEnumerator Watch()
@@ -160,7 +165,7 @@ namespace WeddingTime
 
             EnsureWorldLoaded();
             MigrateLegacyProgress();
-            SyncDaysPerLevelSetting();
+            RemoveLegacyDaysPerLevelKeys();
             var now = ZNet.instance.GetTimeSeconds();
             var players = GetOnlinePlayerIds();
             var keys = ZoneSystem.instance.GetGlobalKeys().ToList();
@@ -352,7 +357,7 @@ namespace WeddingTime
             foreach (var pair in pairs)
             {
                 var pairKey = MakePairKey(pair.First, pair.Second);
-            var level = Math.Min(MaximumLevel, 1 + ReadProgressCentidays(keyList, pairKey) / GetHundredthsPerLevel(keyList));
+                var level = Math.Min(MaximumLevel, 1 + ReadProgressCentidays(keyList, pairKey) / GetHundredthsPerLevel(keyList));
                 PlayerLevels[pair.First] = level;
                 PlayerLevels[pair.Second] = level;
                 PartnerIds[pair.First] = pair.Second;
@@ -362,21 +367,8 @@ namespace WeddingTime
 
         private static int GetHundredthsPerLevel(IEnumerable<string> keys)
         {
+            // DaysTogetherPerLevel is a server-synced config entry, so clients already hold the server's value.
             var configuredDays = Plugin.DaysTogetherPerLevel != null ? Plugin.DaysTogetherPerLevel.Value : 5;
-            if (ZNet.instance == null || !ZNet.instance.IsServer())
-            {
-                foreach (var key in keys)
-                {
-                    if (key.StartsWith(DaysPerLevelPrefix, StringComparison.Ordinal)
-                        && int.TryParse(key.Substring(DaysPerLevelPrefix.Length), out var savedDays)
-                        && savedDays >= 1 && savedDays <= 100)
-                    {
-                        configuredDays = savedDays;
-                        break;
-                    }
-                }
-            }
-
             return Math.Max(1, Math.Min(100, configuredDays)) * HundredthsPerDay;
         }
 
@@ -429,19 +421,16 @@ namespace WeddingTime
             Plugin.ModLogger.LogInfo($"Migrated Wedding Bond progress for {legacyProgress.Count} couple(s) to the corrected in-game day length.");
         }
 
-        private static void SyncDaysPerLevelSetting()
+        // Versions before 0.5.11 mirrored the config value into a world global key.
+        private static void RemoveLegacyDaysPerLevelKeys()
         {
             if (ZoneSystem.instance == null || ZNet.instance == null || !ZNet.instance.IsServer()) return;
 
-            var configuredDays = Math.Max(1, Math.Min(100, Plugin.DaysTogetherPerLevel.Value));
-            var desiredKey = DaysPerLevelPrefix + configuredDays;
-            var existingKeys = ZoneSystem.instance.GetGlobalKeys()
-                .Where(key => key.StartsWith(DaysPerLevelPrefix, StringComparison.Ordinal)).ToList();
-            if (existingKeys.Count == 1 && existingKeys[0] == desiredKey) return;
-
-            foreach (var key in existingKeys) ZoneSystem.instance.RemoveGlobalKey(key);
-            ZoneSystem.instance.SetGlobalKey(desiredKey);
-            Plugin.ModLogger.LogInfo($"Wedding progression setting synchronized to world: {configuredDays} shared in-game days per level.");
+            foreach (var key in ZoneSystem.instance.GetGlobalKeys()
+                .Where(key => key.StartsWith(DaysPerLevelPrefix, StringComparison.Ordinal)).ToList())
+            {
+                ZoneSystem.instance.RemoveGlobalKey(key);
+            }
         }
 
         private static bool TryParseProgressKey(string key, out string pairKey, out int centidays)

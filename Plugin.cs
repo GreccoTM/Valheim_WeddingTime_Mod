@@ -4,7 +4,9 @@ using BepInEx.Logging;
 using HarmonyLib;
 using Jotunn.Configs;
 using Jotunn.Entities;
+using Jotunn.Extensions;
 using Jotunn.Managers;
+using Jotunn.Utils;
 using System;
 using System.Collections;
 using System.IO;
@@ -16,11 +18,13 @@ namespace WeddingTime
 {
     [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
     [BepInDependency("com.jotunn.jotunn", BepInDependency.DependencyFlags.HardDependency)]
+    [NetworkCompatibility(CompatibilityLevel.EveryoneMustHaveMod, VersionStrictness.Minor)]
     public sealed class Plugin : BaseUnityPlugin
     {
         public const string PluginGuid = "ice.weddingtime";
         public const string PluginName = "Wedding Time";
-        public const string PluginVersion = "0.5.10";
+        public const string PluginVersion = "0.5.11";
+        internal const string RingPrefabName = "WeddingTime_Ring";
 
         internal static Plugin Instance { get; private set; }
         internal static ManualLogSource ModLogger;
@@ -29,6 +33,10 @@ namespace WeddingTime
         internal static SE_Stats WeddingBuff { get; private set; }
         internal static bool WeddingBuffEnhanced => _configuredBuffEnhanced;
         internal static ConfigEntry<int> DaysTogetherPerLevel { get; private set; }
+        private static ConfigEntry<int> _upgradeCoinCost;
+        private static ConfigEntry<int> _upgradeJadeCost;
+        private static readonly MethodInfo UpdateFoodMethod = AccessTools.Method(typeof(Player), "UpdateFood", new[] { typeof(float), typeof(bool) });
+        private Harmony _harmony;
         private static readonly System.Collections.Generic.Dictionary<long, GameObject> WeddingGlows = new System.Collections.Generic.Dictionary<long, GameObject>();
         private bool _weddingRingRegistered;
         private static int _configuredBuffLevel = -1;
@@ -38,9 +46,16 @@ namespace WeddingTime
         {
             Instance = this;
             ModLogger = Logger;
-            DaysTogetherPerLevel = Config.Bind("Progression", "DaysTogetherPerLevel", 5,
-                new ConfigDescription("Shared in-game days the married couple must spend online together to gain each Wedding Bond level. Requires a server restart after editing.",
-                    new AcceptableValueRange<int>(1, 100)));
+            DaysTogetherPerLevel = Config.BindConfig("Progression", "DaysTogetherPerLevel", 5,
+                "Shared in-game days the married couple must spend online together to gain each Wedding Bond level. Synced from the server.",
+                true, acceptableValues: new AcceptableValueRange<int>(1, 100));
+            _upgradeCoinCost = Config.BindConfig("Upgrade", "CoinCost", 3000,
+                "Coins required to upgrade the Wedding Ring at the Forge. Requires a restart after editing.",
+                false, acceptableValues: new AcceptableValueRange<int>(0, 100000));
+            _upgradeJadeCost = Config.BindConfig("Upgrade", "JadeCost", 1,
+                "Jade required to upgrade the Wedding Ring at the Forge. Requires a restart after editing.",
+                false, acceptableValues: new AcceptableValueRange<int>(0, 100));
+            AddLocalization();
             PrefabManager.OnVanillaPrefabsAvailable += RegisterWeddingRing;
             CommandManager.Instance.AddConsoleCommand(new DebugMarriageCommand());
             CommandManager.Instance.AddConsoleCommand(new DebugWeddingLevelCommand());
@@ -50,17 +65,35 @@ namespace WeddingTime
             CommandManager.Instance.AddConsoleCommand(new IDoNotCommand());
             WeddingProposalService.RegisterRpcs();
             WeddingCelebrationService.RegisterRpcs();
-            new Harmony(PluginGuid).PatchAll();
-            StartCoroutine(WatchDebugBuff());
+            _harmony = new Harmony(PluginGuid);
+            _harmony.PatchAll();
+            StartCoroutine(WatchBondState());
             StartCoroutine(WeddingProgression.Watch());
             StartCoroutine(WatchWeddingGlows());
             ModLogger.LogInfo("Wedding Time loaded; waiting for vanilla prefabs to register the wedding ring.");
             ModLogger.LogInfo($"Wedding Bond progression is configured for {DaysTogetherPerLevel.Value} shared in-game days per level.");
+        }
 
+        private static void AddLocalization()
+        {
+            var localization = LocalizationManager.Instance.GetLocalization();
+            var english = "English";
+            localization.AddTranslation(english, new System.Collections.Generic.Dictionary<string, string>
+            {
+                { "weddingtime_ring_name", "Wedding Ring" },
+                { "weddingtime_ring_description", "Crafted for someone special. After accepting a proposal, equip the ring made by your partner to share the Wedding Bond." }
+            });
+            var portuguese = "Portuguese_Brazilian";
+            localization.AddTranslation(portuguese, new System.Collections.Generic.Dictionary<string, string>
+            {
+                { "weddingtime_ring_name", "Aliança de Casamento" },
+                { "weddingtime_ring_description", "Feita para alguém especial. Depois de aceitar um pedido, equipe a aliança feita pelo seu parceiro para compartilhar o Laço do Casamento." }
+            });
         }
 
         private void RegisterWeddingRing()
         {
+            PrefabManager.OnVanillaPrefabsAvailable -= RegisterWeddingRing;
             if (_weddingRingRegistered)
             {
                 return;
@@ -68,8 +101,8 @@ namespace WeddingTime
 
             var config = new ItemConfig
             {
-                Name = "Wedding Ring",
-                Description = "Crafted for someone special. After accepting a proposal, equip the ring made by your partner to share the Wedding Bond.",
+                Name = "$weddingtime_ring_name",
+                Description = "$weddingtime_ring_description",
                 StackSize = 1,
                 CraftingStation = "forge",
                 Requirements = new[]
@@ -93,7 +126,7 @@ namespace WeddingTime
                 ModLogger.LogError("Could not register the Wedding Bond status effect.");
             }
 
-            var ring = new CustomItem("WeddingTime_Ring", "Amber", config);
+            var ring = new CustomItem(RingPrefabName, "Amber", config);
             ring.ItemDrop.m_itemData.m_shared.m_itemType = ItemDrop.ItemData.ItemType.Utility;
             ring.ItemDrop.m_itemData.m_shared.m_maxQuality = 2;
             // Zero value keeps traders (e.g. Haldor) from listing the ring as sellable.
@@ -108,7 +141,7 @@ namespace WeddingTime
             {
                 _weddingRingRegistered = true;
                 StartCoroutine(ConfigureRingUpgradeWhenObjectDbReady(ring.ItemPrefab.name));
-                ModLogger.LogInfo("Wedding Ring registered as a quality 2 Utility item. Its Forge upgrade costs 3000 Coins and 1 Jade; the upgraded ring doubles Wedding Bond effects.");
+                ModLogger.LogInfo($"Wedding Ring registered as a quality 2 Utility item. Its Forge upgrade costs {_upgradeCoinCost.Value} Coins and {_upgradeJadeCost.Value} Jade; the upgraded ring doubles Wedding Bond effects.");
             }
             else
             {
@@ -140,18 +173,18 @@ namespace WeddingTime
                         {
                             m_resItem = coins,
                             m_amount = 0,
-                            m_amountPerLevel = 3000,
+                            m_amountPerLevel = _upgradeCoinCost.Value,
                             m_recover = false
                         });
                         requirements.Add(new Piece.Requirement
                         {
                             m_resItem = jade,
                             m_amount = 0,
-                            m_amountPerLevel = 1,
+                            m_amountPerLevel = _upgradeJadeCost.Value,
                             m_recover = false
                         });
                         recipe.m_resources = requirements.ToArray();
-                        ModLogger.LogInfo("Wedding Ring upgrade requirements applied to the live ObjectDB recipe: 3000 Coins and 1 Jade for quality 2.");
+                        ModLogger.LogInfo($"Wedding Ring upgrade requirements applied to the live ObjectDB recipe: {_upgradeCoinCost.Value} Coins and {_upgradeJadeCost.Value} Jade for quality 2.");
                         yield break;
                     }
                 }
@@ -168,9 +201,11 @@ namespace WeddingTime
             RefreshDebugBuff();
         }
 
-        private IEnumerator WatchDebugBuff()
+        // Equip/unequip patches refresh the bond immediately; this slower loop is a safety net
+        // for state that arrives later (world keys, partner changes, quality upgrades).
+        private IEnumerator WatchBondState()
         {
-            var wait = new WaitForSeconds(1f);
+            var wait = new WaitForSeconds(2f);
             while (true)
             {
                 WeddingProposalService.RestoreFromWorld();
@@ -230,11 +265,18 @@ namespace WeddingTime
         private void OnDestroy()
         {
             WeddingProgression.Flush();
+            PrefabManager.OnVanillaPrefabsAvailable -= RegisterWeddingRing;
+            _harmony?.UnpatchSelf();
             foreach (var glow in WeddingGlows.Values)
             {
                 if (glow != null) Destroy(glow);
             }
             WeddingGlows.Clear();
+        }
+
+        internal static bool IsWeddingRing(ItemDrop.ItemData item)
+        {
+            return item != null && item.m_dropPrefab != null && item.m_dropPrefab.name == RingPrefabName;
         }
 
         internal static bool HasWeddingBond(Player player)
@@ -264,7 +306,7 @@ namespace WeddingTime
             var enhancedRingEquipped = false;
             foreach (var item in player.GetInventory().GetAllItems())
             {
-                if (item.m_equipped && item.m_dropPrefab != null && item.m_dropPrefab.name == "WeddingTime_Ring")
+                if (item.m_equipped && IsWeddingRing(item))
                 {
                     ringEquipped = true;
                     if (WeddingProposalService.EngagedPartnerId != 0
@@ -317,8 +359,7 @@ namespace WeddingTime
 
         private static void RefreshMaxStats(Player player)
         {
-            var updateFood = AccessTools.Method(typeof(Player), "UpdateFood", new[] { typeof(float), typeof(bool) });
-            updateFood?.Invoke(player, new object[] { 0f, true });
+            UpdateFoodMethod?.Invoke(player, new object[] { 0f, true });
         }
 
         private static void ConfigureWeddingBuff(int level, bool enhanced)
@@ -356,7 +397,7 @@ namespace WeddingTime
             if (_configuredBuffLevel >= 10) effects.Add($"Lv10: {50 * factor}% less stagger{doubleText}");
             WeddingBuff.m_name = $"Wedding Bond\nLv. {_configuredBuffLevel}/10";
             WeddingBuff.m_tooltip = string.Join("\n", effects);
-            Plugin.ModLogger.LogInfo($"Configured Wedding Bond effects for level {_configuredBuffLevel}.");
+            Plugin.ModLogger.LogDebug($"Configured Wedding Bond effects for level {_configuredBuffLevel}.");
         }
 
         private static void SetDroppedRingModel(GameObject itemPrefab)

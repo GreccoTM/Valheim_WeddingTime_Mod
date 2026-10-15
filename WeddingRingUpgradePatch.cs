@@ -35,7 +35,7 @@ namespace WeddingTime
 
             if (__instance == null || player == null || UpgradeItemField == null
                 || !(UpgradeItemField.GetValue(__instance) is ItemDrop.ItemData item)
-                || item.m_dropPrefab == null || item.m_dropPrefab.name != "WeddingTime_Ring")
+                || !Plugin.IsWeddingRing(item))
             {
                 return;
             }
@@ -79,8 +79,7 @@ namespace WeddingTime
             {
                 var inventory = state.Player != null ? state.Player.GetInventory() : null;
                 var items = inventory?.GetAllItems();
-                var upgradedRing = items?.FirstOrDefault(item => item?.m_dropPrefab != null
-                    && item.m_dropPrefab.name == "WeddingTime_Ring"
+                var upgradedRing = items?.FirstOrDefault(item => Plugin.IsWeddingRing(item)
                     && item.m_quality > state.OriginalQuality
                     && item.m_gridPos.x == state.GridX && item.m_gridPos.y == state.GridY);
 
@@ -119,8 +118,7 @@ namespace WeddingTime
             private static void Postfix(object[] __args, ItemDrop.ItemData __result)
             {
                 var state = _activeUpgrade;
-                if (state == null || __result == null || __result.m_dropPrefab == null
-                    || __result.m_dropPrefab.name != "WeddingTime_Ring"
+                if (state == null || !Plugin.IsWeddingRing(__result)
                     || __result.m_quality <= state.OriginalQuality)
                 {
                     return;
@@ -128,7 +126,7 @@ namespace WeddingTime
 
                 var args = __args;
                 if (args == null || args.Length == 0 || !(args[0] is string prefabName)
-                    || prefabName != "WeddingTime_Ring")
+                    || prefabName != Plugin.RingPrefabName)
                 {
                     return;
                 }
