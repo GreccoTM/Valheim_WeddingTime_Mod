@@ -80,9 +80,7 @@ namespace WeddingTime
 
         private static void ShowCelebration(string firstName, string secondName, int level, Vector3 firstPosition, Vector3 secondPosition)
         {
-            var message = $"Congratulations to {firstName} and {secondName}! Their Wedding Bond reached Level {level}!";
-            if (Chat.instance != null) Chat.instance.AddString(message);
-            if (MessageHud.instance != null) MessageHud.instance.ShowMessage(MessageHud.MessageType.Center, message);
+            WeddingText.Show(WeddingText.T("celebration", firstName, secondName, level.ToString()));
 
             CreateFireworks(firstPosition);
             CreateFireworks(secondPosition);

@@ -1,8 +1,24 @@
-using System;
 using Jotunn.Entities;
+using Jotunn.Managers;
 
 namespace WeddingTime
 {
+    internal static class WeddingCommands
+    {
+        internal static void Register()
+        {
+            var commands = CommandManager.Instance;
+            commands.AddConsoleCommand(new WeddingTimeCommand());
+            commands.AddConsoleCommand(new DoYouMarryMeCommand());
+            commands.AddConsoleCommand(new IDoCommand());
+            commands.AddConsoleCommand(new IDoNotCommand());
+            commands.AddConsoleCommand(new DivorceCommand());
+            commands.AddConsoleCommand(new AdminDivorceCommand());
+            commands.AddConsoleCommand(new DebugMarriageCommand());
+            commands.AddConsoleCommand(new DebugWeddingLevelCommand());
+        }
+    }
+
     internal sealed class WeddingTimeCommand : ConsoleCommand
     {
         public override string Name => "wedding_time";
@@ -33,15 +49,8 @@ namespace WeddingTime
                 return;
             }
 
-            var targetName = string.Join(" ", args).Trim();
-            if (WeddingProposalService.Propose(targetName, out var message))
-            {
-                context?.AddString(message);
-            }
-            else
-            {
-                context?.AddString(message);
-            }
+            WeddingProposalService.Propose(string.Join(" ", args).Trim(), out var message);
+            context?.AddString(message);
         }
     }
 
@@ -80,10 +89,7 @@ namespace WeddingTime
             context?.AddString(message);
         }
     }
-}
 
-namespace WeddingTime
-{
     internal sealed class DivorceCommand : ConsoleCommand
     {
         public override string Name => "divorce";
@@ -109,13 +115,13 @@ namespace WeddingTime
     internal sealed class AdminDivorceCommand : ConsoleCommand
     {
         public override string Name => "wedding_admin_divorce";
-        public override string Help => "Admin only: immediately end the marriage of an online player: wedding_admin_divorce <player name>";
+        public override string Help => "Admin only: immediately end a player's marriage: wedding_admin_divorce <online player name | player ID>";
 
         public override void Run(string[] args, Terminal context)
         {
             if (args.Length == 0)
             {
-                context?.AddString("Usage: wedding_admin_divorce <player name>");
+                context?.AddString("Usage: wedding_admin_divorce <online player name | player ID>");
                 return;
             }
 

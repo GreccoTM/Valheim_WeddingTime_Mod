@@ -17,7 +17,7 @@ namespace WeddingTime
             }
 
             var enabled = args[0] == "on";
-            Plugin.SetDebugMarriage(enabled);
+            WeddingBond.SetDebugMarriage(enabled);
             context?.AddString(enabled
                 ? "Debug marriage enabled. With the Wedding Ring equipped, the temporary level 1 Wedding Bond should appear."
                 : "Debug marriage disabled; the temporary effect has been removed.");

@@ -5,7 +5,10 @@
     <Nullable>disable</Nullable>
     <AssemblyName>WeddingTime</AssemblyName>
     <RootNamespace>WeddingTime</RootNamespace>
-    <Version>0.5.11</Version>
+    <!-- Single source of the mod version: Plugin.PluginVersion is generated from it and the build
+         fails if thunderstore/manifest.json disagrees. -->
+    <Version>0.6.0</Version>
+    <!-- Override with: dotnet build -p:ValheimDir=/path/to/Valheim -->
     <ValheimDir Condition="'$(ValheimDir)' == ''">/mnt/Kingston1Tb/SteamLibrary/steamapps/common/Valheim</ValheimDir>
     <OutputPath>$(MSBuildProjectDirectory)/artifacts/</OutputPath>
   </PropertyGroup>
@@ -31,12 +34,20 @@
       <HintPath>$(ValheimDir)/valheim_Data/Managed/assembly_utils.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="assembly_guiutils">
+      <HintPath>$(ValheimDir)/valheim_Data/Managed/assembly_guiutils.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="UnityEngine.CoreModule">
       <HintPath>$(ValheimDir)/valheim_Data/Managed/UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine">
       <HintPath>$(ValheimDir)/valheim_Data/Managed/UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.ParticleSystemModule">
+      <HintPath>$(ValheimDir)/valheim_Data/Managed/UnityEngine.ParticleSystemModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.ImageConversionModule">
@@ -46,4 +57,29 @@
     <EmbeddedResource Include="assets/wedding_ring_icon.png" LogicalName="WeddingTime.wedding_ring_icon.png" />
     <EmbeddedResource Include="assets/wedding_ring_icon_upgraded.png" LogicalName="WeddingTime.wedding_ring_icon_upgraded.png" />
   </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="tests/**" />
+    <None Remove="tests/**" />
+  </ItemGroup>
+
+  <Target Name="GeneratePluginInfo" BeforeTargets="CoreCompile">
+    <PropertyGroup>
+      <PluginInfoFile>$(IntermediateOutputPath)PluginInfo.g.cs</PluginInfoFile>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(PluginInfoFile)" Overwrite="true" WriteOnlyWhenDifferent="true"
+                      Lines="namespace WeddingTime { internal static class PluginInfo { internal const string Version = &quot;$(Version)&quot;%3B } }" />
+    <ItemGroup>
+      <Compile Include="$(PluginInfoFile)" />
+      <FileWrites Include="$(PluginInfoFile)" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="CheckManifestVersion" BeforeTargets="Build">
+    <PropertyGroup>
+      <ManifestText>$([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)/thunderstore/manifest.json'))</ManifestText>
+    </PropertyGroup>
+    <Error Condition="!$(ManifestText.Contains('&quot;version_number&quot;: &quot;$(Version)&quot;'))"
+           Text="thunderstore/manifest.json version_number does not match &lt;Version&gt; $(Version) in WeddingTime.csproj." />
+  </Target>
 </Project>

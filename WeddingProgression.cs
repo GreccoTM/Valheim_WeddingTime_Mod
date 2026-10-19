@@ -8,21 +8,15 @@ namespace WeddingTime
 {
     internal static class WeddingProgression
     {
-        private const string MarriagePrefix = "weddingtime_married_";
-        private const string ProgressPrefix = "weddingtime_shared_";
         private const string DaysPerLevelPrefix = "weddingtime_days_per_level_";
         private const string ProgressSchemaKey = "weddingtime_progress_schema_2";
         private const int LegacySecondsPerDay = 86400;
         private const int DefaultGameDayLengthSeconds = 1800;
         private const double PersistIntervalDays = 0.25;
-        private const int HundredthsPerDay = 100;
-        private const int MaximumLevel = 10;
 
         private static readonly Dictionary<string, double> SharedSeconds = new Dictionary<string, double>();
         private static readonly Dictionary<string, double> PersistedSeconds = new Dictionary<string, double>();
         private static readonly Dictionary<string, double> LastOnlineWorldTime = new Dictionary<string, double>();
-        private static readonly Dictionary<long, int> PlayerLevels = new Dictionary<long, int>();
-        private static readonly Dictionary<long, long> PartnerIds = new Dictionary<long, long>();
         private static readonly HashSet<string> WaitingForPlayersLog = new HashSet<string>();
         private static long _worldUid;
         private static bool _worldInitialized;
@@ -33,67 +27,44 @@ namespace WeddingTime
 
         internal static void SetDebugLevel(int level)
         {
-            _debugLevel = level < 1 || level > MaximumLevel ? 0 : level;
-            Plugin.RefreshDebugBuff();
-        }
-
-        internal static int GetLevelForPlayer(Player player)
-        {
-            if (player == null) return 1;
-            if (player == Player.m_localPlayer) return CurrentLevel;
-            return PlayerLevels.TryGetValue(player.GetPlayerID(), out var level) ? level : 1;
+            _debugLevel = level < 1 || level > WeddingKeys.MaximumLevel ? 0 : level;
+            WeddingBond.Refresh();
         }
 
         internal static string GetLocalProgressSummary()
         {
             if (Player.m_localPlayer == null || ZNet.instance == null || ZoneSystem.instance == null)
             {
-                return "Wedding Bond progress is unavailable right now. Enter a world first.";
+                return WeddingText.T("progress_unavailable");
             }
 
             EnsureWorldLoaded();
-            var localId = Player.m_localPlayer.GetPlayerID();
-            var keys = ZoneSystem.instance.GetGlobalKeys().ToList();
-            var marriage = GetMarriagePairs(keys)
-                .FirstOrDefault(pair => pair.First == localId || pair.Second == localId);
-            if (marriage.First == 0 || marriage.Second == 0)
+            var keys = ZoneSystem.instance.GetGlobalKeys();
+            if (!WeddingKeys.TryFindPartner(keys, Player.m_localPlayer.GetPlayerID(), out var partnerId))
             {
-                return "You are not married in this world. Wedding Bond progress has not started.";
+                return WeddingText.T("progress_not_married");
             }
 
-            var daysPerLevel = GetHundredthsPerLevel(keys) / HundredthsPerDay;
-            var centidays = ReadProgressCentidays(keys, MakePairKey(marriage.First, marriage.Second));
-            var level = Math.Min(MaximumLevel, 1 + centidays / (daysPerLevel * HundredthsPerDay));
-            if (level >= MaximumLevel)
+            var partnerName = WeddingProposalService.MarriedPartnerId == partnerId && !string.IsNullOrEmpty(WeddingProposalService.EngagedPartnerName)
+                ? WeddingProposalService.EngagedPartnerName
+                : WeddingText.KeyArg("your_partner");
+            var daysPerLevel = DaysPerLevel();
+            var centidays = WeddingKeys.ReadProgressCentidays(keys, WeddingKeys.PairKey(Player.m_localPlayer.GetPlayerID(), partnerId));
+            var level = WeddingKeys.LevelFor(centidays, daysPerLevel);
+            if (level >= WeddingKeys.MaximumLevel)
             {
-                return $"Wedding Bond: Level 10/10 — maximum level reached ({centidays / (double)HundredthsPerDay:0.00} shared days).";
+                return WeddingText.T("progress_max", partnerName, FormatDays(centidays));
             }
 
-            var progressThisLevel = centidays % (daysPerLevel * HundredthsPerDay);
-            var daysIntoLevel = progressThisLevel / (double)HundredthsPerDay;
-            var daysRemaining = (daysPerLevel * HundredthsPerDay - progressThisLevel) / (double)HundredthsPerDay;
-            return $"Wedding Bond: Level {level}/10 — {daysIntoLevel:0.00}/{daysPerLevel} shared days; {daysRemaining:0.00} days until Level {level + 1}.";
+            var hundredthsPerLevel = daysPerLevel * WeddingKeys.HundredthsPerDay;
+            var progressThisLevel = centidays % hundredthsPerLevel;
+            return WeddingText.T("progress", partnerName, level.ToString(), FormatDays(progressThisLevel),
+                daysPerLevel.ToString(), FormatDays(hundredthsPerLevel - progressThisLevel), (level + 1).ToString());
         }
 
-        internal static bool HasPartnerRingEquipped(Player player)
+        private static string FormatDays(int centidays)
         {
-            return FindEquippedPartnerRing(player) != null;
-        }
-
-        internal static bool HasEnhancedPartnerRingEquipped(Player player)
-        {
-            var ring = FindEquippedPartnerRing(player);
-            return ring != null && ring.m_quality >= 2;
-        }
-
-        private static ItemDrop.ItemData FindEquippedPartnerRing(Player player)
-        {
-            if (player == null || player.GetInventory() == null
-                || !PartnerIds.TryGetValue(player.GetPlayerID(), out var partnerId)) return null;
-
-            return player.GetInventory().GetAllItems().FirstOrDefault(item => item.m_equipped
-                && Plugin.IsWeddingRing(item)
-                && item.m_crafterID == partnerId);
+            return (centidays / (double)WeddingKeys.HundredthsPerDay).ToString("0.00");
         }
 
         // A dedicated server only has Player objects for characters near it, so resolve
@@ -117,15 +88,36 @@ namespace WeddingTime
             return true;
         }
 
+        internal static List<long> FindOnlinePlayerIdsByName(string name)
+        {
+            var ids = new HashSet<long>();
+            if (string.IsNullOrEmpty(name)) return ids.ToList();
+
+            foreach (var player in Player.GetAllPlayers() ?? new List<Player>())
+            {
+                if (player != null && string.Equals(player.GetPlayerName(), name, StringComparison.OrdinalIgnoreCase))
+                {
+                    ids.Add(player.GetPlayerID());
+                }
+            }
+
+            foreach (var peer in ZNet.instance?.GetPeers() ?? new List<ZNetPeer>())
+            {
+                if (peer == null || !string.Equals(peer.m_playerName, name, StringComparison.OrdinalIgnoreCase)) continue;
+                var playerId = GetPlayerIdForCharacter(peer.m_characterID);
+                if (playerId != 0) ids.Add(playerId);
+            }
+
+            return ids.ToList();
+        }
+
         internal static long GetPlayerIdForPeer(long peerId)
         {
             var player = Player.GetAllPlayers()?.FirstOrDefault(candidate => candidate != null && candidate.GetZDOID().UserID == peerId);
             if (player != null) return player.GetPlayerID();
 
             var peer = ZNet.instance?.GetPeer(peerId);
-            if (peer == null || peer.m_characterID.IsNone() || ZDOMan.instance == null) return 0;
-            var character = ZDOMan.instance.GetZDO(peer.m_characterID);
-            return character != null ? character.GetLong(ZDOVars.s_playerID, 0L) : 0;
+            return peer != null ? GetPlayerIdForCharacter(peer.m_characterID) : 0;
         }
 
         internal static bool TryGetPeerIdForPlayer(long playerId, out long peerId)
@@ -137,60 +129,48 @@ namespace WeddingTime
 
         private static ZNetPeer FindPeerByPlayerId(long playerId)
         {
-            var peers = ZNet.instance?.GetPeers();
-            if (peers == null || ZDOMan.instance == null) return null;
-            foreach (var peer in peers)
-            {
-                if (peer == null || peer.m_characterID.IsNone()) continue;
-                var character = ZDOMan.instance.GetZDO(peer.m_characterID);
-                if (character != null && character.GetLong(ZDOVars.s_playerID, 0L) == playerId) return peer;
-            }
-            return null;
+            return ZNet.instance?.GetPeers()?.FirstOrDefault(peer => peer != null && GetPlayerIdForCharacter(peer.m_characterID) == playerId);
+        }
+
+        private static long GetPlayerIdForCharacter(ZDOID characterId)
+        {
+            if (characterId.IsNone() || ZDOMan.instance == null) return 0;
+            var character = ZDOMan.instance.GetZDO(characterId);
+            return character != null ? character.GetLong(ZDOVars.s_playerID, 0L) : 0;
         }
 
         internal static bool TryGetPartnerId(long playerId, out long partnerId)
         {
             partnerId = 0;
-            if (ZoneSystem.instance == null) return false;
-            foreach (var pair in GetMarriagePairs(ZoneSystem.instance.GetGlobalKeys()))
-            {
-                if (pair.First == playerId) { partnerId = pair.Second; return true; }
-                if (pair.Second == playerId) { partnerId = pair.First; return true; }
-            }
-            return false;
+            return ZoneSystem.instance != null && WeddingKeys.TryFindPartner(ZoneSystem.instance.GetGlobalKeys(), playerId, out partnerId);
         }
 
-        // Server only: erase the marriage and all of the couple's saved progress.
+        internal static bool IsMarried(long playerId)
+        {
+            return TryGetPartnerId(playerId, out _);
+        }
+
+        // Server only: erase the marriage, any pending divorce and all of the couple's saved progress.
         internal static void RemoveMarriage(long first, long second)
         {
             if (ZoneSystem.instance == null || ZNet.instance == null || !ZNet.instance.IsServer()) return;
 
-            var pairKey = MakePairKey(first, second);
-            var progressPrefix = ProgressPrefix + pairKey + "_";
-            foreach (var key in ZoneSystem.instance.GetGlobalKeys().ToList())
+            var pairKey = WeddingKeys.PairKey(first, second);
+            foreach (var key in ZoneSystem.instance.GetGlobalKeys())
             {
-                if (key == MarriagePrefix + pairKey || key.StartsWith(progressPrefix, StringComparison.Ordinal))
+                if (key == WeddingKeys.MarriageKey(first, second)
+                    || (WeddingKeys.TryParseProgressKey(key, out var progressPair, out _) && progressPair == pairKey))
                 {
-                    ZoneSystem.instance.RemoveGlobalKey(key);
+                    WeddingWorldKeys.Remove(key);
                 }
             }
+            WeddingDivorceService.RemovePendingKeys(first, second);
 
             SharedSeconds.Remove(pairKey);
             PersistedSeconds.Remove(pairKey);
             LastOnlineWorldTime.Remove(pairKey);
             WaitingForPlayersLog.Remove(pairKey);
-            PlayerLevels.Remove(first);
-            PlayerLevels.Remove(second);
-            PartnerIds.Remove(first);
-            PartnerIds.Remove(second);
             Plugin.ModLogger.LogInfo($"Removed marriage and Wedding Bond progress for couple {pairKey}.");
-        }
-
-        internal static bool IsMarried(long playerId)
-        {
-            if (ZoneSystem.instance == null) return false;
-            return GetMarriagePairs(ZoneSystem.instance.GetGlobalKeys())
-                .Any(pair => pair.First == playerId || pair.Second == playerId);
         }
 
         internal static IEnumerator Watch()
@@ -206,10 +186,7 @@ namespace WeddingTime
 
         internal static void Flush()
         {
-            if (ZNet.instance == null || !ZNet.instance.IsServer() || ZoneSystem.instance == null)
-            {
-                return;
-            }
+            if (ZNet.instance == null || !ZNet.instance.IsServer() || ZoneSystem.instance == null) return;
 
             foreach (var pair in SharedSeconds.Keys.ToList())
             {
@@ -219,29 +196,19 @@ namespace WeddingTime
 
         internal static void RefreshLocalLevel()
         {
-            if (ZNet.instance == null || ZoneSystem.instance == null || Player.m_localPlayer == null)
-            {
-                return;
-            }
+            if (ZNet.instance == null || ZoneSystem.instance == null || Player.m_localPlayer == null) return;
 
             EnsureWorldLoaded();
+            var keys = ZoneSystem.instance.GetGlobalKeys();
             var localId = Player.m_localPlayer.GetPlayerID();
-            var keys = ZoneSystem.instance.GetGlobalKeys().ToList();
-            var marriagePairs = GetMarriagePairs(keys);
-            RefreshPlayerLevels(marriagePairs, keys);
-            var matching = marriagePairs
-                .FirstOrDefault(pair => pair.First == localId || pair.Second == localId);
-
-            if (matching.First == 0 || matching.Second == 0)
+            if (!WeddingKeys.TryFindPartner(keys, localId, out var partnerId))
             {
                 SetLocalLevel(1);
                 return;
             }
 
-            var key = MakePairKey(matching.First, matching.Second);
-            var centidays = ReadProgressCentidays(ZoneSystem.instance.GetGlobalKeys(), key);
-            var level = Math.Min(MaximumLevel, 1 + centidays / GetHundredthsPerLevel(keys));
-            SetLocalLevel(level);
+            var centidays = WeddingKeys.ReadProgressCentidays(keys, WeddingKeys.PairKey(localId, partnerId));
+            SetLocalLevel(WeddingKeys.LevelFor(centidays, DaysPerLevel()));
         }
 
         private static void TickServer()
@@ -258,18 +225,15 @@ namespace WeddingTime
             RemoveLegacyDaysPerLevelKeys();
             var now = ZNet.instance.GetTimeSeconds();
             var players = GetOnlinePlayerIds();
-            var keys = ZoneSystem.instance.GetGlobalKeys().ToList();
-            var marriagePairs = GetMarriagePairs(keys);
-            RefreshPlayerLevels(marriagePairs, keys);
+            var keys = ZoneSystem.instance.GetGlobalKeys();
             var onlinePairs = new HashSet<string>();
 
-            foreach (var pair in marriagePairs)
+            foreach (var pair in WeddingKeys.GetMarriagePairs(keys))
             {
-                var key = MakePairKey(pair.First, pair.Second);
+                var key = WeddingKeys.PairKey(pair.First, pair.Second);
                 if (!SharedSeconds.ContainsKey(key))
                 {
-                    var centidays = ReadProgressCentidays(keys, key);
-                    var storedSeconds = centidays / (double)HundredthsPerDay * GetGameSecondsPerDay();
+                    var storedSeconds = WeddingKeys.ReadProgressCentidays(keys, key) / (double)WeddingKeys.HundredthsPerDay * GetGameSecondsPerDay();
                     SharedSeconds[key] = storedSeconds;
                     PersistedSeconds[key] = storedSeconds;
                 }
@@ -290,14 +254,14 @@ namespace WeddingTime
 
                 onlinePairs.Add(key);
                 WaitingForPlayersLog.Remove(key);
-                if (!LastOnlineWorldTime.ContainsKey(key))
-                {
-                    Plugin.ModLogger.LogInfo($"Started counting shared Wedding Bond time for couple {key}.");
-                }
                 if (LastOnlineWorldTime.TryGetValue(key, out var lastTime))
                 {
                     var delta = Math.Max(0.0, now - lastTime);
                     SharedSeconds[key] = SharedSeconds.TryGetValue(key, out var current) ? current + delta : delta;
+                }
+                else
+                {
+                    Plugin.ModLogger.LogInfo($"Started counting shared Wedding Bond time for couple {key}.");
                 }
                 LastOnlineWorldTime[key] = now;
 
@@ -318,33 +282,18 @@ namespace WeddingTime
         private static HashSet<long> GetOnlinePlayerIds()
         {
             var playerIds = new HashSet<long>();
-            var allPlayers = Player.GetAllPlayers();
-            if (allPlayers != null)
+            foreach (var player in Player.GetAllPlayers() ?? new List<Player>())
             {
-                foreach (var player in allPlayers)
-                {
-                    if (player == null) continue;
-                    var playerId = player.GetPlayerID();
-                    if (playerId != 0) playerIds.Add(playerId);
-                }
+                var playerId = player != null ? player.GetPlayerID() : 0;
+                if (playerId != 0) playerIds.Add(playerId);
             }
 
             // A dedicated server may not expose every connected character as a local
             // Player component. Its peer roster contains each character ZDO instead.
-            if (ZNet.instance != null && ZDOMan.instance != null)
+            foreach (var peer in ZNet.instance?.GetPeers() ?? new List<ZNetPeer>())
             {
-                var peers = ZNet.instance.GetPeers();
-                if (peers != null)
-                {
-                    foreach (var peer in peers)
-                    {
-                        if (peer == null || peer.m_characterID.IsNone()) continue;
-                        var character = ZDOMan.instance.GetZDO(peer.m_characterID);
-                        if (character == null) continue;
-                        var playerId = character.GetLong(ZDOVars.s_playerID, 0L);
-                        if (playerId != 0) playerIds.Add(playerId);
-                    }
-                }
+                var playerId = peer != null ? GetPlayerIdForCharacter(peer.m_characterID) : 0;
+                if (playerId != 0) playerIds.Add(playerId);
             }
 
             return playerIds;
@@ -353,28 +302,22 @@ namespace WeddingTime
         private static void EnsureWorldLoaded()
         {
             var uid = ZNet.instance.GetWorldUID();
-            if (_worldInitialized && _worldUid == uid)
-            {
-                return;
-            }
+            if (_worldInitialized && _worldUid == uid) return;
 
             _worldUid = uid;
             _worldInitialized = true;
             SharedSeconds.Clear();
             PersistedSeconds.Clear();
             LastOnlineWorldTime.Clear();
-            PlayerLevels.Clear();
-            PartnerIds.Clear();
             WaitingForPlayersLog.Clear();
 
-            foreach (var key in ZoneSystem.instance.GetGlobalKeys())
+            var keys = ZoneSystem.instance.GetGlobalKeys();
+            foreach (var pair in WeddingKeys.GetMarriagePairs(keys))
             {
-                if (TryParseProgressKey(key, out var pairKey, out var centidays))
-                {
-                    var seconds = centidays / (double)HundredthsPerDay * GetGameSecondsPerDay();
-                    SharedSeconds[pairKey] = seconds;
-                    PersistedSeconds[pairKey] = seconds;
-                }
+                var pairKey = WeddingKeys.PairKey(pair.First, pair.Second);
+                var seconds = WeddingKeys.ReadProgressCentidays(keys, pairKey) / (double)WeddingKeys.HundredthsPerDay * GetGameSecondsPerDay();
+                SharedSeconds[pairKey] = seconds;
+                PersistedSeconds[pairKey] = seconds;
             }
 
             Plugin.ModLogger.LogInfo($"Wedding progression loaded for world {uid}.");
@@ -388,78 +331,42 @@ namespace WeddingTime
                 return;
             }
 
-            var centidays = (int)Math.Floor(seconds / GetGameSecondsPerDay() * HundredthsPerDay);
-            var saved = PersistedSeconds.TryGetValue(pairKey, out var previous)
-                ? (int)Math.Floor(previous / GetGameSecondsPerDay() * HundredthsPerDay)
-                : 0;
-            if (centidays == saved)
-            {
-                return;
-            }
+            var centidays = ToCentidays(seconds);
+            var saved = PersistedSeconds.TryGetValue(pairKey, out var previous) ? ToCentidays(previous) : 0;
+            if (centidays == saved || centidays <= 0) return;
 
-            var prefix = ProgressPrefix + pairKey + "_";
-            foreach (var oldKey in ZoneSystem.instance.GetGlobalKeys()
-                .Where(key => key.StartsWith(prefix, StringComparison.Ordinal)).ToList())
+            // Write the new value before removing the old ones, so a crash in between never loses progress
+            // (readers take the highest value).
+            var newKey = WeddingKeys.ProgressKey(pairKey, centidays);
+            WeddingWorldKeys.Set(newKey);
+            foreach (var oldKey in ZoneSystem.instance.GetGlobalKeys())
             {
-                ZoneSystem.instance.RemoveGlobalKey(oldKey);
-            }
-
-            if (centidays > 0)
-            {
-                ZoneSystem.instance.SetGlobalKey(prefix + centidays);
-            }
-
-            PersistedSeconds[pairKey] = centidays / (double)HundredthsPerDay * GetGameSecondsPerDay();
-            var hundredthsPerLevel = GetHundredthsPerLevel(ZoneSystem.instance.GetGlobalKeys());
-            var oldLevel = Math.Min(MaximumLevel, 1 + saved / hundredthsPerLevel);
-            var newLevel = Math.Min(MaximumLevel, 1 + centidays / hundredthsPerLevel);
-            if (newLevel > oldLevel)
-            {
-                Plugin.ModLogger.LogInfo($"Wedding Bond progression for couple {pairKey}: level {oldLevel} -> {newLevel} ({centidays / (double)HundredthsPerDay:0.00} shared world days).");
-                var ids = pairKey.Split('_');
-                if (ids.Length == 2 && long.TryParse(ids[0], out var firstId) && long.TryParse(ids[1], out var secondId))
+                if (oldKey != newKey && WeddingKeys.TryParseProgressKey(oldKey, out var oldPair, out _) && oldPair == pairKey)
                 {
-                    WeddingCelebrationService.AnnounceLevelUp(firstId, secondId, newLevel);
+                    WeddingWorldKeys.Remove(oldKey);
                 }
             }
-        }
 
-        private static int ReadProgressCentidays(IEnumerable<string> keys, string pairKey)
-        {
-            var prefix = ProgressPrefix + pairKey + "_";
-            var best = 0;
-            foreach (var key in keys)
+            PersistedSeconds[pairKey] = centidays / (double)WeddingKeys.HundredthsPerDay * GetGameSecondsPerDay();
+            var oldLevel = WeddingKeys.LevelFor(saved, DaysPerLevel());
+            var newLevel = WeddingKeys.LevelFor(centidays, DaysPerLevel());
+            if (newLevel > oldLevel && WeddingKeys.TryParsePairKey(pairKey, out var firstId, out var secondId))
             {
-                if (key.StartsWith(prefix, StringComparison.Ordinal)
-                    && int.TryParse(key.Substring(prefix.Length), out var value))
-                {
-                    best = Math.Max(best, value);
-                }
-            }
-            return best;
-        }
-
-        private static void RefreshPlayerLevels(IEnumerable<(long First, long Second)> pairs, IEnumerable<string> keys)
-        {
-            PlayerLevels.Clear();
-            PartnerIds.Clear();
-            var keyList = keys.ToList();
-            foreach (var pair in pairs)
-            {
-                var pairKey = MakePairKey(pair.First, pair.Second);
-                var level = Math.Min(MaximumLevel, 1 + ReadProgressCentidays(keyList, pairKey) / GetHundredthsPerLevel(keyList));
-                PlayerLevels[pair.First] = level;
-                PlayerLevels[pair.Second] = level;
-                PartnerIds[pair.First] = pair.Second;
-                PartnerIds[pair.Second] = pair.First;
+                Plugin.ModLogger.LogInfo($"Wedding Bond progression for couple {pairKey}: level {oldLevel} -> {newLevel} ({FormatDays(centidays)} shared world days).");
+                WeddingCelebrationService.AnnounceLevelUp(firstId, secondId, newLevel);
             }
         }
 
-        private static int GetHundredthsPerLevel(IEnumerable<string> keys)
+        private static int ToCentidays(double seconds)
         {
-            // DaysTogetherPerLevel is a server-synced config entry, so clients already hold the server's value.
+            return (int)Math.Floor(seconds / GetGameSecondsPerDay() * WeddingKeys.HundredthsPerDay);
+        }
+
+        // DaysTogetherPerLevel is a server-synced config entry, so clients already hold the server's value.
+        private static int DaysPerLevel()
+        {
             var configuredDays = Plugin.DaysTogetherPerLevel != null ? Plugin.DaysTogetherPerLevel.Value : 5;
-            return Math.Max(1, Math.Min(100, configuredDays)) * HundredthsPerDay;
+            return Math.Max(1, Math.Min(100, configuredDays));
         }
 
         private static double GetGameSecondsPerDay()
@@ -473,23 +380,21 @@ namespace WeddingTime
         {
             if (ZoneSystem.instance == null || ZNet.instance == null || !ZNet.instance.IsServer()) return;
 
-            var keys = ZoneSystem.instance.GetGlobalKeys().ToList();
+            var keys = ZoneSystem.instance.GetGlobalKeys();
             if (keys.Contains(ProgressSchemaKey)) return;
 
             var legacyProgress = new Dictionary<string, int>();
             foreach (var key in keys)
             {
-                if (TryParseProgressKey(key, out var pairKey, out var centidays))
+                if (WeddingKeys.TryParseProgressKey(key, out var pairKey, out var centidays))
                 {
-                    legacyProgress[pairKey] = Math.Max(
-                        legacyProgress.TryGetValue(pairKey, out var previous) ? previous : 0,
-                        centidays);
+                    legacyProgress[pairKey] = Math.Max(legacyProgress.TryGetValue(pairKey, out var previous) ? previous : 0, centidays);
                 }
             }
 
-            foreach (var key in keys.Where(key => key.StartsWith(ProgressPrefix, StringComparison.Ordinal)).ToList())
+            foreach (var key in keys.Where(key => key.StartsWith(WeddingKeys.ProgressPrefix, StringComparison.Ordinal)))
             {
-                ZoneSystem.instance.RemoveGlobalKey(key);
+                WeddingWorldKeys.Remove(key);
             }
 
             foreach (var pair in legacyProgress)
@@ -501,11 +406,11 @@ namespace WeddingTime
                     MidpointRounding.AwayFromZero);
                 if (migratedCentidays > 0)
                 {
-                    ZoneSystem.instance.SetGlobalKey(ProgressPrefix + pair.Key + "_" + migratedCentidays);
+                    WeddingWorldKeys.Set(WeddingKeys.ProgressKey(pair.Key, migratedCentidays));
                 }
             }
 
-            ZoneSystem.instance.SetGlobalKey(ProgressSchemaKey);
+            WeddingWorldKeys.Set(ProgressSchemaKey);
             _worldInitialized = false;
             EnsureWorldLoaded();
             Plugin.ModLogger.LogInfo($"Migrated Wedding Bond progress for {legacyProgress.Count} couple(s) to the corrected in-game day length.");
@@ -517,52 +422,15 @@ namespace WeddingTime
             if (ZoneSystem.instance == null || ZNet.instance == null || !ZNet.instance.IsServer()) return;
 
             foreach (var key in ZoneSystem.instance.GetGlobalKeys()
-                .Where(key => key.StartsWith(DaysPerLevelPrefix, StringComparison.Ordinal)).ToList())
+                .Where(key => key.StartsWith(DaysPerLevelPrefix, StringComparison.Ordinal)))
             {
-                ZoneSystem.instance.RemoveGlobalKey(key);
+                WeddingWorldKeys.Remove(key);
             }
-        }
-
-        private static bool TryParseProgressKey(string key, out string pairKey, out int centidays)
-        {
-            pairKey = null;
-            centidays = 0;
-            if (string.IsNullOrEmpty(key) || !key.StartsWith(ProgressPrefix, StringComparison.Ordinal))
-            {
-                return false;
-            }
-
-            var valueStart = key.LastIndexOf('_');
-            if (valueStart <= ProgressPrefix.Length || !int.TryParse(key.Substring(valueStart + 1), out centidays))
-            {
-                return false;
-            }
-
-            pairKey = key.Substring(ProgressPrefix.Length, valueStart - ProgressPrefix.Length);
-            return pairKey.Length > 0 && centidays >= 0;
-        }
-
-        private static List<(long First, long Second)> GetMarriagePairs(IEnumerable<string> keys)
-        {
-            var pairs = new List<(long First, long Second)>();
-            foreach (var key in keys)
-            {
-                if (!key.StartsWith(MarriagePrefix, StringComparison.Ordinal)) continue;
-                var ids = key.Substring(MarriagePrefix.Length).Split('_');
-                if (ids.Length != 2 || !long.TryParse(ids[0], out var first) || !long.TryParse(ids[1], out var second)) continue;
-                pairs.Add((Math.Min(first, second), Math.Max(first, second)));
-            }
-            return pairs;
-        }
-
-        private static string MakePairKey(long first, long second)
-        {
-            return Math.Min(first, second) + "_" + Math.Max(first, second);
         }
 
         private static void SetLocalLevel(int level)
         {
-            level = Math.Max(1, Math.Min(MaximumLevel, level));
+            level = Math.Max(1, Math.Min(WeddingKeys.MaximumLevel, level));
             if (_localLevel == level) return;
             _localLevel = level;
             Plugin.ModLogger.LogInfo($"Local Wedding Bond level is now {level}.");

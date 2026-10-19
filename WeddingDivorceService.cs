@@ -1,6 +1,5 @@
 using System;
 using System.Collections;
-using System.Collections.Generic;
 using System.Linq;
 using Jotunn;
 using Jotunn.Entities;
@@ -19,7 +18,6 @@ namespace WeddingTime
         private const int ModeCancel = 1;
         private const int ModeAdminForce = 2;
 
-        private static readonly Dictionary<string, PendingDivorce> Pending = new Dictionary<string, PendingDivorce>();
         private static CustomRPC _requestRpc;
         private static CustomRPC _noticeRpc;
         private static float _armedUntil;
@@ -35,16 +33,19 @@ namespace WeddingTime
 
         internal static bool Arm(out string message)
         {
-            if (WeddingProposalService.EngagedPartnerId == 0)
+            if (WeddingProposalService.MarriedPartnerId == 0)
             {
-                message = "You are not married.";
+                message = WeddingText.T("not_married");
                 return false;
             }
 
             _armedUntil = Time.time + ConfirmWindow;
             var delay = Plugin.DivorceDelaySeconds.Value;
-            var wait = delay > 0 ? $" The divorce becomes final {FormatDelay(delay)} after you confirm; either of you can cancel before then." : string.Empty;
-            message = $"Divorcing {WeddingProposalService.EngagedPartnerName} ends your Wedding Bond and erases your shared progress.{wait} Type /divorce confirm within {ConfirmWindow:0} seconds to proceed.";
+            var wait = delay > 0 ? WeddingText.T("divorce_warning_wait", WeddingText.DurationArg(delay)) : string.Empty;
+            var partnerName = string.IsNullOrEmpty(WeddingProposalService.EngagedPartnerName)
+                ? WeddingText.KeyArg("your_partner")
+                : WeddingProposalService.EngagedPartnerName;
+            message = WeddingText.T("divorce_warning", partnerName, wait, ConfirmWindow.ToString("0"));
             return true;
         }
 
@@ -52,65 +53,58 @@ namespace WeddingTime
         {
             if (Time.time >= _armedUntil)
             {
-                message = "Nothing to confirm. Type /divorce first.";
+                message = WeddingText.T("nothing_to_confirm");
                 return false;
             }
 
             _armedUntil = 0f;
-            return Send(ModeRequest, 0, out message);
+            return Send(ModeRequest, 0, string.Empty, out message);
         }
 
         internal static bool Cancel(out string message)
         {
             _armedUntil = 0f;
-            return Send(ModeCancel, 0, out message);
+            return Send(ModeCancel, 0, string.Empty, out message);
         }
 
-        internal static bool AdminDivorce(string targetName, out string message)
+        // The server resolves the target, so it works for players far away (by name) or offline (by player ID).
+        internal static bool AdminDivorce(string target, out string message)
         {
-            var target = Player.GetAllPlayers()
-                .Where(player => player != null && string.Equals(player.GetPlayerName(), targetName, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-            if (target.Count != 1)
-            {
-                message = target.Count == 0
-                    ? $"No online player named '{targetName}' was found nearby."
-                    : $"More than one player is named '{targetName}'.";
-                return false;
-            }
-
-            return Send(ModeAdminForce, target[0].GetPlayerID(), out message);
+            return long.TryParse(target, out var playerId)
+                ? Send(ModeAdminForce, playerId, string.Empty, out message)
+                : Send(ModeAdminForce, 0, target, out message);
         }
 
-        private static bool Send(int mode, long targetPlayerId, out string message)
+        private static bool Send(int mode, long targetPlayerId, string targetName, out string message)
         {
             var localPlayer = Player.m_localPlayer;
             if (localPlayer == null || ZNet.instance == null || _requestRpc == null)
             {
-                message = "The world is not ready yet.";
+                message = WeddingText.T("not_ready");
                 return false;
             }
 
             if (ZNet.instance.IsServer())
             {
-                HandleRequest(localPlayer.GetPlayerID(), SynchronizationManager.Instance.PlayerIsAdmin, mode, targetPlayerId);
+                HandleRequest(localPlayer.GetPlayerID(), SynchronizationManager.Instance.PlayerIsAdmin, mode, targetPlayerId, targetName);
             }
             else
             {
                 var serverPeer = ZNet.instance.GetServerPeer();
                 if (serverPeer == null)
                 {
-                    message = "Not connected to the server.";
+                    message = WeddingText.T("not_connected");
                     return false;
                 }
 
                 var package = new ZPackage();
                 package.Write(mode);
                 package.Write(targetPlayerId);
+                package.Write(targetName ?? string.Empty);
                 _requestRpc.SendPackage(serverPeer.m_uid, package);
             }
 
-            message = "Request sent.";
+            message = WeddingText.T("request_sent");
             return true;
         }
 
@@ -128,8 +122,10 @@ namespace WeddingTime
             try
             {
                 var ended = package.ReadBool();
-                var message = package.ReadString();
-                HandleNotice(ended, message);
+                var key = package.ReadString();
+                var args = new string[package.ReadInt()];
+                for (var index = 0; index < args.Length; index++) args[index] = package.ReadString();
+                HandleNotice(ended, key, args);
             }
             catch (Exception exception)
             {
@@ -137,16 +133,15 @@ namespace WeddingTime
             }
         }
 
-        private static void HandleNotice(bool ended, string message)
+        private static void HandleNotice(bool ended, string key, string[] args)
         {
             if (ended)
             {
-                WeddingProposalService.ClearEngagement();
+                WeddingProposalService.EndMarriageLocally();
                 WeddingProgression.RefreshLocalLevel();
-                Plugin.RefreshDebugBuff();
             }
 
-            WeddingProposalService.ShowMessage(message);
+            WeddingText.Show(WeddingText.T(key, args));
         }
 
         // ---- Server side -------------------------------------------------------------------
@@ -158,10 +153,12 @@ namespace WeddingTime
 
             int mode;
             long targetPlayerId;
+            string targetName;
             try
             {
                 mode = package.ReadInt();
                 targetPlayerId = package.ReadLong();
+                targetName = package.ReadString();
             }
             catch (Exception exception)
             {
@@ -176,100 +173,153 @@ namespace WeddingTime
                 yield break;
             }
 
-            HandleRequest(senderPlayerId, ZNet.instance.IsAdmin(senderPeerId), mode, targetPlayerId);
+            HandleRequest(senderPlayerId, ZNet.instance.IsAdmin(senderPeerId), mode, targetPlayerId, targetName);
         }
 
-        private static void HandleRequest(long senderPlayerId, bool senderIsAdmin, int mode, long targetPlayerId)
+        private static void HandleRequest(long senderPlayerId, bool senderIsAdmin, int mode, long targetPlayerId, string targetName)
         {
             if (mode == ModeAdminForce)
             {
-                if (!senderIsAdmin)
-                {
-                    Notify(senderPlayerId, false, "Only server admins can force a divorce.");
-                    return;
-                }
-
-                if (!WeddingProgression.TryGetPartnerId(targetPlayerId, out var targetPartner))
-                {
-                    Notify(senderPlayerId, false, "That player is not married.");
-                    return;
-                }
-
-                Execute(targetPlayerId, targetPartner, "A server admin ended this marriage.");
+                HandleAdminRequest(senderPlayerId, senderIsAdmin, targetPlayerId, targetName);
                 return;
             }
 
             if (!WeddingProgression.TryGetPartnerId(senderPlayerId, out var partnerId))
             {
-                Notify(senderPlayerId, false, "You are not married.");
+                Notify(senderPlayerId, false, "not_married");
                 return;
             }
 
-            var pairKey = Math.Min(senderPlayerId, partnerId) + "_" + Math.Max(senderPlayerId, partnerId);
+            var hasPending = HasPendingDivorce(senderPlayerId, partnerId);
             if (mode == ModeCancel)
             {
-                if (Pending.Remove(pairKey))
+                if (!hasPending)
                 {
-                    Notify(senderPlayerId, false, "The divorce was cancelled.");
-                    Notify(partnerId, false, "The divorce was cancelled.");
+                    Notify(senderPlayerId, false, "no_pending_divorce");
+                    return;
                 }
-                else
-                {
-                    Notify(senderPlayerId, false, "There is no pending divorce.");
-                }
+
+                RemovePendingKeys(senderPlayerId, partnerId);
+                Notify(senderPlayerId, false, "divorce_cancelled");
+                Notify(partnerId, false, "divorce_cancelled");
                 return;
             }
 
             if (mode != ModeRequest) return;
 
-            if (Pending.ContainsKey(pairKey))
+            if (hasPending)
             {
-                Notify(senderPlayerId, false, "A divorce is already pending. Use /divorce cancel to stop it.");
+                Notify(senderPlayerId, false, "divorce_already_pending");
                 return;
             }
 
             var delay = Plugin.DivorceDelaySeconds.Value;
             if (delay <= 0)
             {
-                Execute(senderPlayerId, partnerId, "Your marriage has ended.");
+                Execute(senderPlayerId, partnerId, "marriage_ended");
                 return;
             }
 
-            Pending[pairKey] = new PendingDivorce { First = senderPlayerId, Second = partnerId, ExecuteAt = Time.time + delay };
-            WeddingProgression.TryGetOnlinePlayer(senderPlayerId, out var senderName, out _);
-            Notify(senderPlayerId, false, $"Divorce requested. It becomes final {FormatDelay(delay)} from now. Use /divorce cancel to stop it.");
-            Notify(partnerId, false, $"{senderName ?? "Your partner"} requested a divorce. It becomes final {FormatDelay(delay)} from now. Use /divorce cancel to stop it.");
+            // Real (UTC) time so world-time jumps from sleeping cannot skip the waiting period,
+            // and a pending divorce survives a server restart.
+            var executeAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + delay;
+            WeddingWorldKeys.Set(WeddingKeys.DivorceKey(senderPlayerId, partnerId, executeAt));
+            var senderName = WeddingProgression.TryGetOnlinePlayer(senderPlayerId, out var name, out _)
+                ? name
+                : WeddingText.KeyArg("your_partner");
+            Notify(senderPlayerId, false, "divorce_requested", WeddingText.DurationArg(delay));
+            Notify(partnerId, false, "divorce_requested_partner", senderName, WeddingText.DurationArg(delay));
+            Plugin.ModLogger.LogInfo($"Divorce of couple {WeddingKeys.PairKey(senderPlayerId, partnerId)} scheduled in {delay} s.");
         }
 
+        private static void HandleAdminRequest(long senderPlayerId, bool senderIsAdmin, long targetPlayerId, string targetName)
+        {
+            if (!senderIsAdmin)
+            {
+                Notify(senderPlayerId, false, "admin_only");
+                return;
+            }
+
+            if (targetPlayerId == 0)
+            {
+                var matches = WeddingProgression.FindOnlinePlayerIdsByName(targetName);
+                if (matches.Count != 1)
+                {
+                    Notify(senderPlayerId, false, matches.Count == 0 ? "target_not_found" : "target_ambiguous", targetName);
+                    return;
+                }
+                targetPlayerId = matches[0];
+            }
+
+            if (!WeddingProgression.TryGetPartnerId(targetPlayerId, out var targetPartner))
+            {
+                Notify(senderPlayerId, false, "target_not_married");
+                return;
+            }
+
+            Execute(targetPlayerId, targetPartner, "admin_ended");
+            if (senderPlayerId != targetPlayerId && senderPlayerId != targetPartner)
+            {
+                Notify(senderPlayerId, false, "admin_done", string.IsNullOrEmpty(targetName) ? targetPlayerId.ToString() : targetName);
+            }
+        }
+
+        // Server only: finalize divorces whose waiting period is over.
         internal static void Tick()
         {
-            if (Pending.Count == 0) return;
+            if (ZoneSystem.instance == null) return;
 
-            var now = Time.time;
-            foreach (var entry in Pending.Where(pair => now >= pair.Value.ExecuteAt).ToList())
+            var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            foreach (var key in ZoneSystem.instance.GetGlobalKeys())
             {
-                Pending.Remove(entry.Key);
-                if (WeddingProgression.TryGetPartnerId(entry.Value.First, out var partner) && partner == entry.Value.Second)
+                if (!WeddingKeys.TryParseDivorceKey(key, out var first, out var second, out var executeAt) || now < executeAt) continue;
+
+                if (WeddingProgression.TryGetPartnerId(first, out var partner) && partner == second)
                 {
-                    Execute(entry.Value.First, entry.Value.Second, "Your marriage has ended.");
+                    Execute(first, second, "marriage_ended");
+                }
+                else
+                {
+                    WeddingWorldKeys.Remove(key);
                 }
             }
         }
 
-        private static void Execute(long first, long second, string message)
+        private static bool HasPendingDivorce(long first, long second)
         {
-            Pending.Remove(Math.Min(first, second) + "_" + Math.Max(first, second));
-            WeddingProgression.RemoveMarriage(first, second);
-            Notify(first, true, message);
-            Notify(second, true, message);
+            var pairKey = WeddingKeys.PairKey(first, second);
+            return ZoneSystem.instance.GetGlobalKeys().Any(key =>
+                WeddingKeys.TryParseDivorceKey(key, out var a, out var b, out _) && WeddingKeys.PairKey(a, b) == pairKey);
         }
 
-        private static void Notify(long playerId, bool ended, string message)
+        internal static void RemovePendingKeys(long first, long second)
+        {
+            if (ZoneSystem.instance == null) return;
+
+            var pairKey = WeddingKeys.PairKey(first, second);
+            foreach (var key in ZoneSystem.instance.GetGlobalKeys().ToList())
+            {
+                if (WeddingKeys.TryParseDivorceKey(key, out var a, out var b, out _) && WeddingKeys.PairKey(a, b) == pairKey)
+                {
+                    WeddingWorldKeys.Remove(key);
+                }
+            }
+        }
+
+        private static void Execute(long first, long second, string messageKey)
+        {
+            WeddingProgression.RemoveMarriage(first, second);
+            Notify(first, true, messageKey);
+            Notify(second, true, messageKey);
+        }
+
+        // Offline partners are not notified here; they learn about it from their character file on next join.
+        private static void Notify(long playerId, bool ended, string key, params string[] args)
         {
             var localPlayer = Player.m_localPlayer;
             if (localPlayer != null && localPlayer.GetPlayerID() == playerId)
             {
-                HandleNotice(ended, message);
+                HandleNotice(ended, key, args);
                 return;
             }
 
@@ -277,7 +327,9 @@ namespace WeddingTime
 
             var package = new ZPackage();
             package.Write(ended);
-            package.Write(message);
+            package.Write(key);
+            package.Write(args.Length);
+            foreach (var arg in args) package.Write(arg ?? string.Empty);
             _noticeRpc.SendPackage(peerId, package);
         }
 
@@ -285,18 +337,6 @@ namespace WeddingTime
         {
             yield return null;
             Plugin.ModLogger.LogWarning($"Ignored client-originated marriage notice from peer {senderPeerId}.");
-        }
-
-        private static string FormatDelay(int seconds)
-        {
-            return seconds >= 120 ? $"{seconds / 60} minutes" : seconds >= 60 ? "1 minute" : $"{seconds} seconds";
-        }
-
-        private sealed class PendingDivorce
-        {
-            internal long First;
-            internal long Second;
-            internal float ExecuteAt;
         }
     }
 }

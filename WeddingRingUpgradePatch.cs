@@ -35,7 +35,7 @@ namespace WeddingTime
 
             if (__instance == null || player == null || UpgradeItemField == null
                 || !(UpgradeItemField.GetValue(__instance) is ItemDrop.ItemData item)
-                || !Plugin.IsWeddingRing(item))
+                || !WeddingRing.IsWeddingRing(item))
             {
                 return;
             }
@@ -79,7 +79,7 @@ namespace WeddingTime
             {
                 var inventory = state.Player != null ? state.Player.GetInventory() : null;
                 var items = inventory?.GetAllItems();
-                var upgradedRing = items?.FirstOrDefault(item => Plugin.IsWeddingRing(item)
+                var upgradedRing = items?.FirstOrDefault(item => WeddingRing.IsWeddingRing(item)
                     && item.m_quality > state.OriginalQuality
                     && item.m_gridPos.x == state.GridX && item.m_gridPos.y == state.GridY);
 
@@ -115,18 +115,12 @@ namespace WeddingTime
                             && parameter.Name == "quality"));
             }
 
-            private static void Postfix(object[] __args, ItemDrop.ItemData __result)
+            // Runs for every crafted or spawned item, so bail out early and avoid Harmony's __args array allocation.
+            private static void Postfix(string name, ItemDrop.ItemData __result)
             {
                 var state = _activeUpgrade;
-                if (state == null || !Plugin.IsWeddingRing(__result)
+                if (state == null || name != WeddingRing.PrefabName || !WeddingRing.IsWeddingRing(__result)
                     || __result.m_quality <= state.OriginalQuality)
-                {
-                    return;
-                }
-
-                var args = __args;
-                if (args == null || args.Length == 0 || !(args[0] is string prefabName)
-                    || prefabName != Plugin.RingPrefabName)
                 {
                     return;
                 }

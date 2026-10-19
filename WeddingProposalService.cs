@@ -14,9 +14,15 @@ namespace WeddingTime
         private const string ResponseRpcName = "MarriageProposalResponse";
         private const string PersistMarriageRpcName = "PersistMarriage";
         private const string MarriageRejectedRpcName = "MarriageRejected";
-        private const string MarriageKeyPrefix = "weddingtime_married_";
+        private const string RememberedPartnerPrefix = "weddingtime_partner_";
         private const float ProposalRange = 5f;
         private const float ProposalLifetime = 120f;
+        // The server drops a half-confirmed marriage after ProposalLifetime + 30 s; give its answer time to arrive.
+        private const float ServerConfirmationGrace = ProposalLifetime + 60f;
+        // Global keys arrive shortly after the character spawns; wait before concluding a marriage is gone.
+        private const float AwayCheckDelay = 15f;
+        // The divorce notice can arrive just after the updated keys; let it explain the change first.
+        private const float MissingRecordGrace = 10f;
 
         private static CustomRPC _proposalRpc;
         private static CustomRPC _responseRpc;
@@ -25,20 +31,25 @@ namespace WeddingTime
         private static PendingProposal _outgoing;
         private static PendingProposal _incoming;
         private static long _loadedWorldUid;
+        private static long _trackedPlayerId;
+        private static float _trackedSince;
+        private static float _awaitingConfirmationSince;
+        private static float _recordMissingSince;
 
         // Server only: a marriage is saved once BOTH partners have asked for it, so a client
         // cannot marry another player on its own.
         private static readonly Dictionary<string, PendingMarriage> PendingMarriages = new Dictionary<string, PendingMarriage>();
 
+        // Set as soon as a proposal is accepted, before the server has saved the marriage.
         internal static long EngagedPartnerId { get; private set; }
-        internal static string EngagedPartnerName { get; private set; }
+        internal static string EngagedPartnerName { get; private set; } = string.Empty;
+
+        // The partner only once the marriage is saved in the world; the Wedding Bond requires this.
+        internal static long MarriedPartnerId => _awaitingConfirmationSince > 0f ? 0 : EngagedPartnerId;
 
         internal static void RegisterRpcs()
         {
-            if (_proposalRpc != null && _responseRpc != null)
-            {
-                return;
-            }
+            if (_proposalRpc != null) return;
 
             _proposalRpc = NetworkManager.Instance.AddRPC(ProposalRpcName, RPC_ReceiveProposal, RPC_ReceiveProposal);
             _responseRpc = NetworkManager.Instance.AddRPC(ResponseRpcName, RPC_ReceiveResponse, RPC_ReceiveResponse);
@@ -47,58 +58,336 @@ namespace WeddingTime
             Plugin.ModLogger.LogInfo("Marriage proposal and persistence CustomRPC handlers registered through Jotunn.");
         }
 
-        internal static void RestoreFromWorld()
+        // ---- Client state ------------------------------------------------------------------
+
+        // Brings the local engagement in line with the world's marriage keys. Runs every couple of seconds,
+        // so a lost server message (rejection, divorce) can never leave a client married on its own.
+        internal static void Reconcile()
         {
             var player = Player.m_localPlayer;
             var zoneSystem = ZoneSystem.instance;
-            if (player == null || zoneSystem == null || ZNet.instance == null)
-            {
-                return;
-            }
+            if (player == null || zoneSystem == null || ZNet.instance == null) return;
 
             var worldUid = ZNet.instance.GetWorldUID();
-            if (_loadedWorldUid != worldUid)
+            var playerId = player.GetPlayerID();
+            if (_loadedWorldUid != worldUid || _trackedPlayerId != playerId)
             {
                 _loadedWorldUid = worldUid;
-                EngagedPartnerId = 0;
-                EngagedPartnerName = string.Empty;
+                _trackedPlayerId = playerId;
+                _trackedSince = Time.time;
+                ClearEngagement();
                 Plugin.ModLogger.LogInfo($"Loading marriage state for world {worldUid}.");
             }
 
-            if (EngagedPartnerId != 0) return;
-
-            var playerId = player.GetPlayerID();
-            foreach (var key in zoneSystem.GetGlobalKeys())
+            if (WeddingKeys.TryFindPartner(zoneSystem.GetGlobalKeys(), playerId, out var recordedPartner))
             {
-                if (TryReadMarriageKey(key, playerId, out var partnerId))
+                var justConfirmed = _awaitingConfirmationSince > 0f && EngagedPartnerId == recordedPartner;
+                if (EngagedPartnerId != recordedPartner)
                 {
-                    EngagedPartnerId = partnerId;
-                    var partner = FindPlayer(partnerId);
-                    EngagedPartnerName = partner != null ? partner.GetPlayerName() : string.Empty;
-                    Plugin.ModLogger.LogInfo($"Restored marriage for player {playerId} and partner {partnerId} from this world's save.");
+                    EngagedPartnerId = recordedPartner;
+                    EngagedPartnerName = string.Empty;
+                    Plugin.ModLogger.LogInfo($"Restored marriage for player {playerId} and partner {recordedPartner} from this world's save.");
+                }
+                _awaitingConfirmationSince = 0f;
+                _recordMissingSince = 0f;
+
+                if (string.IsNullOrEmpty(EngagedPartnerName))
+                {
+                    EngagedPartnerName = WeddingProgression.TryGetOnlinePlayer(recordedPartner, out var onlineName, out _)
+                        ? onlineName
+                        : TryRecall(player, out _, out var rememberedName) ? rememberedName : string.Empty;
+                }
+
+                Remember(player, recordedPartner, EngagedPartnerName);
+                if (justConfirmed) WeddingText.Show(WeddingText.T("marriage_recorded", EngagedPartnerName));
+                return;
+            }
+
+            if (EngagedPartnerId != 0)
+            {
+                if (_awaitingConfirmationSince > 0f)
+                {
+                    if (Time.time - _awaitingConfirmationSince < ServerConfirmationGrace) return;
+                    EndMarriageLocally();
+                    WeddingText.Show(WeddingText.T("marriage_failed", WeddingText.KeyArg("reason_not_confirmed")));
                     return;
                 }
+
+                if (_recordMissingSince <= 0f) _recordMissingSince = Time.time;
+                if (Time.time - _recordMissingSince < MissingRecordGrace) return;
+
+                EndMarriageLocally();
+                WeddingText.Show(WeddingText.T("marriage_missing"));
+                return;
+            }
+
+            if (Time.time - _trackedSince >= AwayCheckDelay && TryRecall(player, out _, out var formerName))
+            {
+                Forget(player);
+                WeddingText.Show(WeddingText.T("ended_while_away",
+                    string.IsNullOrEmpty(formerName) ? WeddingText.KeyArg("your_partner") : formerName));
             }
         }
 
-        private static bool TryReadMarriageKey(string key, long playerId, out long partnerId)
+        internal static void ClearEngagement()
+        {
+            EngagedPartnerId = 0;
+            EngagedPartnerName = string.Empty;
+            _awaitingConfirmationSince = 0f;
+            _recordMissingSince = 0f;
+            _incoming = null;
+            _outgoing = null;
+        }
+
+        // The marriage is over (divorce, rejection): also drop the record kept in the character file.
+        internal static void EndMarriageLocally()
+        {
+            ClearEngagement();
+            if (Player.m_localPlayer != null) Forget(Player.m_localPlayer);
+            WeddingBond.Refresh();
+        }
+
+        // The character file remembers the partner per world, so a divorce finalized while this
+        // character was offline can be reported the next time they join.
+        private static string RememberedKey() => RememberedPartnerPrefix + _loadedWorldUid;
+
+        private static void Remember(Player player, long partnerId, string partnerName)
+        {
+            var value = partnerId + "|" + (partnerName ?? string.Empty);
+            if (!player.m_customData.TryGetValue(RememberedKey(), out var current) || current != value)
+            {
+                player.m_customData[RememberedKey()] = value;
+            }
+        }
+
+        private static bool TryRecall(Player player, out long partnerId, out string partnerName)
         {
             partnerId = 0;
-            if (string.IsNullOrEmpty(key) || !key.StartsWith(MarriageKeyPrefix, StringComparison.Ordinal))
-            {
-                return false;
-            }
+            partnerName = string.Empty;
+            if (!player.m_customData.TryGetValue(RememberedKey(), out var value) || string.IsNullOrEmpty(value)) return false;
 
-            var ids = key.Substring(MarriageKeyPrefix.Length).Split('_');
-            if (ids.Length != 2 || !long.TryParse(ids[0], out var first) || !long.TryParse(ids[1], out var second))
-            {
-                return false;
-            }
-
-            if (first == playerId) partnerId = second;
-            else if (second == playerId) partnerId = first;
-            return partnerId != 0;
+            var separator = value.IndexOf('|');
+            var idText = separator >= 0 ? value.Substring(0, separator) : value;
+            partnerName = separator >= 0 ? value.Substring(separator + 1) : string.Empty;
+            return long.TryParse(idText, out partnerId) && partnerId != 0;
         }
+
+        private static void Forget(Player player)
+        {
+            player.m_customData.Remove(RememberedKey());
+        }
+
+        // ---- Proposal flow (client) --------------------------------------------------------
+
+        internal static bool Propose(string targetName, out string message)
+        {
+            var localPlayer = Player.m_localPlayer;
+            if (_proposalRpc == null || localPlayer == null)
+            {
+                message = WeddingText.T("not_ready");
+                return false;
+            }
+
+            if (EngagedPartnerId != 0)
+            {
+                message = WeddingText.T("already_engaged");
+                return false;
+            }
+
+            if (_outgoing != null && Time.time < _outgoing.ExpiresAt)
+            {
+                message = WeddingText.T("proposal_pending");
+                return false;
+            }
+
+            var matches = Player.GetAllPlayers()
+                .Where(player => player != null
+                    && player.GetPlayerID() != localPlayer.GetPlayerID()
+                    && string.Equals(player.GetPlayerName(), targetName, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (matches.Count == 0)
+            {
+                message = WeddingText.T("no_player_named", targetName);
+                return false;
+            }
+
+            if (matches.Count > 1)
+            {
+                message = WeddingText.T("multiple_players_named", targetName);
+                return false;
+            }
+
+            var target = matches[0];
+            if (!IsWithinRange(target, localPlayer))
+            {
+                message = WeddingText.T("get_closer", ProposalRange.ToString("0"), target.GetPlayerName());
+                return false;
+            }
+
+            var targetPlayerId = target.GetPlayerID();
+            var targetPeerId = target.GetZDOID().UserID;
+            _outgoing = new PendingProposal(targetPlayerId, target.GetPlayerName(), targetPeerId, Time.time + ProposalLifetime);
+            var package = new ZPackage();
+            package.Write(localPlayer.GetPlayerName());
+            Plugin.ModLogger.LogInfo($"Sending marriage proposal from {localPlayer.GetPlayerName()} (player ID {localPlayer.GetPlayerID()}) to {target.GetPlayerName()} (player ID {targetPlayerId}, peer ID {targetPeerId}).");
+            _proposalRpc.SendPackage(targetPeerId, package);
+
+            message = WeddingText.T("proposal_sent", target.GetPlayerName());
+            return true;
+        }
+
+        internal static bool Respond(bool accept, out string message)
+        {
+            if (_incoming == null || Time.time >= _incoming.ExpiresAt)
+            {
+                _incoming = null;
+                message = WeddingText.T("no_pending_proposal");
+                return false;
+            }
+
+            var localPlayer = Player.m_localPlayer;
+            if (_responseRpc == null || localPlayer == null)
+            {
+                message = WeddingText.T("not_ready");
+                return false;
+            }
+
+            if (accept && EngagedPartnerId != 0)
+            {
+                message = WeddingText.T("already_engaged_other");
+                return false;
+            }
+
+            var proposal = _incoming;
+            var proposer = FindPlayer(proposal.PlayerId);
+            if (proposer == null || !IsWithinRange(proposer, localPlayer))
+            {
+                _incoming = null;
+                message = WeddingText.T("proposer_gone");
+                return false;
+            }
+
+            Plugin.ModLogger.LogInfo($"Sending marriage response from {localPlayer.GetPlayerName()} to peer {proposal.PeerId}: accepted={accept}.");
+            SendResponse(proposal.PeerId, accept, localPlayer.GetPlayerName(), accept ? string.Empty : "reply_no");
+            _incoming = null;
+
+            if (!accept)
+            {
+                message = WeddingText.T("declined_self", proposal.PlayerName);
+                return true;
+            }
+
+            BeginEngagement(localPlayer, proposal.PlayerId, proposal.PlayerName);
+            message = WeddingText.T("accepted_self", proposal.PlayerName);
+            return true;
+        }
+
+        private static void BeginEngagement(Player localPlayer, long partnerId, string partnerName)
+        {
+            EngagedPartnerId = partnerId;
+            EngagedPartnerName = partnerName;
+            _awaitingConfirmationSince = Time.time;
+            PersistMarriage(localPlayer.GetPlayerID(), partnerId);
+        }
+
+        private static IEnumerator RPC_ReceiveProposal(long senderPeerId, ZPackage package)
+        {
+            yield return null;
+            var proposerName = package.ReadString();
+            Plugin.ModLogger.LogInfo($"Marriage proposal RPC received from peer {senderPeerId} ({proposerName}).");
+            var localPlayer = Player.m_localPlayer;
+            if (localPlayer == null)
+            {
+                Plugin.ModLogger.LogWarning($"Received a marriage proposal from peer {senderPeerId}, but the local player is not ready.");
+                yield break;
+            }
+
+            if (EngagedPartnerId != 0)
+            {
+                SendResponse(senderPeerId, false, localPlayer.GetPlayerName(), "reply_busy");
+                yield break;
+            }
+
+            var proposer = FindPlayerByPeerId(senderPeerId);
+            if (proposer == null || !IsWithinRange(proposer, localPlayer))
+            {
+                Plugin.ModLogger.LogWarning($"Received a marriage proposal from peer {senderPeerId}, but the proposer could not be found nearby.");
+                SendResponse(senderPeerId, false, localPlayer.GetPlayerName(), "reply_not_nearby");
+                yield break;
+            }
+
+            if (_incoming != null && Time.time < _incoming.ExpiresAt)
+            {
+                SendResponse(senderPeerId, false, localPlayer.GetPlayerName(), "reply_other_waiting");
+                WeddingText.Show(WeddingText.T("other_proposal_waiting"));
+                yield break;
+            }
+
+            _incoming = new PendingProposal(proposer.GetPlayerID(), proposerName, senderPeerId, Time.time + ProposalLifetime);
+            Plugin.ModLogger.LogInfo($"Received marriage proposal from {proposerName} (peer {senderPeerId}).");
+            WeddingText.Show(WeddingText.T("proposal_received", proposerName));
+        }
+
+        private static IEnumerator RPC_ReceiveResponse(long senderPeerId, ZPackage package)
+        {
+            yield return null;
+            var accepted = package.ReadBool();
+            var responderName = package.ReadString();
+            var reasonKey = package.ReadString();
+            Plugin.ModLogger.LogInfo($"Marriage response RPC received from peer {senderPeerId} ({responderName}), accepted={accepted}.");
+            if (_outgoing == null || Time.time >= _outgoing.ExpiresAt || _outgoing.PeerId != senderPeerId)
+            {
+                Plugin.ModLogger.LogWarning($"Ignoring marriage response from unexpected peer {senderPeerId}; expected {(_outgoing == null ? "no peer" : _outgoing.PeerId.ToString())}.");
+                yield break;
+            }
+
+            var proposal = _outgoing;
+            _outgoing = null;
+            if (!accepted)
+            {
+                WeddingText.Show(WeddingText.T("reply", responderName, WeddingText.KeyArg(string.IsNullOrEmpty(reasonKey) ? "reply_no" : reasonKey)));
+                yield break;
+            }
+
+            var localPlayer = Player.m_localPlayer;
+            if (localPlayer == null || EngagedPartnerId != 0) yield break;
+
+            BeginEngagement(localPlayer, proposal.PlayerId, responderName);
+            WeddingText.Show(WeddingText.T("accepted_other", responderName));
+        }
+
+        private static void SendResponse(long peerId, bool accepted, string playerName, string reasonKey)
+        {
+            if (_responseRpc == null)
+            {
+                Plugin.ModLogger.LogError("Cannot send marriage response: the Jotunn RPC is not registered.");
+                return;
+            }
+
+            var package = new ZPackage();
+            package.Write(accepted);
+            package.Write(playerName);
+            package.Write(reasonKey ?? string.Empty);
+            _responseRpc.SendPackage(peerId, package);
+        }
+
+        private static bool IsWithinRange(Player other, Player localPlayer)
+        {
+            return (other.transform.position - localPlayer.transform.position).sqrMagnitude <= ProposalRange * ProposalRange;
+        }
+
+        private static Player FindPlayer(long playerId)
+        {
+            return Player.GetAllPlayers().FirstOrDefault(player => player != null && player.GetPlayerID() == playerId);
+        }
+
+        private static Player FindPlayerByPeerId(long peerId)
+        {
+            return Player.GetAllPlayers().FirstOrDefault(player => player != null && player.GetZDOID().UserID == peerId);
+        }
+
+        // ---- Marriage persistence ----------------------------------------------------------
 
         private static void PersistMarriage(long firstPlayerId, long secondPlayerId)
         {
@@ -109,14 +398,10 @@ namespace WeddingTime
 
             var first = Math.Min(firstPlayerId, secondPlayerId);
             var second = Math.Max(firstPlayerId, secondPlayerId);
-            var package = new ZPackage();
-            package.Write(first);
-            package.Write(second);
 
             if (ZNet.instance != null && ZNet.instance.IsServer())
             {
-                var localPlayer = Player.m_localPlayer;
-                if (localPlayer != null) ConfirmMarriage(localPlayer.GetPlayerID(), first, second);
+                ConfirmMarriage(firstPlayerId, first, second);
                 return;
             }
 
@@ -127,22 +412,10 @@ namespace WeddingTime
                 return;
             }
 
+            var package = new ZPackage();
+            package.Write(first);
+            package.Write(second);
             _persistMarriageRpc.SendPackage(serverPeer.m_uid, package);
-        }
-
-        private static void SaveMarriageKey(long firstPlayerId, long secondPlayerId)
-        {
-            if (ZoneSystem.instance == null || ZNet.instance == null || !ZNet.instance.IsServer())
-            {
-                return;
-            }
-
-            var key = MarriageKeyPrefix + firstPlayerId + "_" + secondPlayerId;
-            if (!ZoneSystem.instance.GetGlobalKey(key))
-            {
-                ZoneSystem.instance.SetGlobalKey(key);
-            }
-            Plugin.ModLogger.LogInfo($"Saved marriage pair {firstPlayerId}/{secondPlayerId} in the world save.");
         }
 
         private static IEnumerator RPC_ReceivePersistMarriage(long senderPeerId, ZPackage package)
@@ -167,17 +440,16 @@ namespace WeddingTime
             if (WeddingProgression.IsMarried(first) || WeddingProgression.IsMarried(second))
             {
                 Plugin.ModLogger.LogWarning($"Rejected marriage {first}/{second}: one of the players is already married.");
-                NotifyMarriageRejected(first, second, "one of you is already married.");
-                NotifyMarriageRejected(second, first, "one of you is already married.");
+                NotifyMarriageRejected(first, second, "reason_already_married");
+                NotifyMarriageRejected(second, first, "reason_already_married");
                 return;
             }
 
             PurgeExpiredMarriages();
-            var now = Time.time;
-            var pairKey = first + "_" + second;
+            var pairKey = WeddingKeys.PairKey(first, second);
             if (!PendingMarriages.TryGetValue(pairKey, out var pending))
             {
-                pending = new PendingMarriage { CreatedAt = now };
+                pending = new PendingMarriage { CreatedAt = Time.time };
                 PendingMarriages[pairKey] = pending;
             }
 
@@ -193,250 +465,21 @@ namespace WeddingTime
             }
         }
 
-        internal static bool Propose(string targetName, out string message)
+        private static void SaveMarriageKey(long first, long second)
         {
-            var localPlayer = Player.m_localPlayer;
-            if (_proposalRpc == null || localPlayer == null)
+            if (ZoneSystem.instance == null || ZNet.instance == null || !ZNet.instance.IsServer()) return;
+
+            var key = WeddingKeys.MarriageKey(first, second);
+            if (!ZoneSystem.instance.GetGlobalKey(key))
             {
-                message = "The world is not ready for marriage proposals yet.";
-                return false;
+                WeddingWorldKeys.Set(key);
             }
-
-            if (EngagedPartnerId != 0)
-            {
-                message = "You are already engaged. Complete or cancel that relationship before proposing again.";
-                return false;
-            }
-
-            if (_outgoing != null && Time.time < _outgoing.ExpiresAt)
-            {
-                message = "You already have a proposal awaiting an answer.";
-                return false;
-            }
-
-            var matches = Player.GetAllPlayers()
-                .Where(player => player != null
-                    && player.GetPlayerID() != localPlayer.GetPlayerID()
-                    && string.Equals(player.GetPlayerName(), targetName, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-
-            if (matches.Count == 0)
-            {
-                message = $"No nearby player named '{targetName}' was found. Player names must match exactly.";
-                return false;
-            }
-
-            if (matches.Count > 1)
-            {
-                message = $"More than one nearby player is named '{targetName}'. Ask them to use distinct character names.";
-                return false;
-            }
-
-            var target = matches[0];
-            if ((target.transform.position - localPlayer.transform.position).sqrMagnitude > ProposalRange * ProposalRange)
-            {
-                message = $"Get within {ProposalRange:0} meters of {target.GetPlayerName()} before proposing.";
-                return false;
-            }
-
-            var targetPlayerId = target.GetPlayerID();
-            if (targetPlayerId == EngagedPartnerId)
-            {
-                message = "You are already engaged to this player.";
-                return false;
-            }
-
-            var targetPeerId = target.GetZDOID().UserID;
-            _outgoing = new PendingProposal(targetPlayerId, target.GetPlayerName(), targetPeerId, Time.time + ProposalLifetime);
-            var package = new ZPackage();
-            package.Write(localPlayer.GetPlayerName());
-            Plugin.ModLogger.LogInfo($"Sending marriage proposal from {localPlayer.GetPlayerName()} (player ID {localPlayer.GetPlayerID()}) to {target.GetPlayerName()} (player ID {targetPlayerId}, peer ID {targetPeerId}).");
-            _proposalRpc.SendPackage(targetPeerId, package);
-
-            message = $"You asked {target.GetPlayerName()}, ‘Will you marry me?’ They have two minutes to answer with /i_do or /i_do_not.";
-            return true;
-        }
-
-        internal static bool Respond(bool accept, out string message)
-        {
-            if (_incoming == null || Time.time >= _incoming.ExpiresAt)
-            {
-                _incoming = null;
-                message = "You do not have a pending marriage proposal.";
-                return false;
-            }
-
-            if (_responseRpc == null)
-            {
-                message = "The marriage network is not ready yet.";
-                return false;
-            }
-
-            var proposal = _incoming;
-            var localPlayer = Player.m_localPlayer;
-            if (localPlayer == null)
-            {
-                message = "The local player is not ready.";
-                return false;
-            }
-
-            if (accept && EngagedPartnerId != 0)
-            {
-                message = "You are already engaged to another player.";
-                return false;
-            }
-
-            var proposer = FindPlayer(proposal.PlayerId);
-            if (proposer == null || (proposer.transform.position - localPlayer.transform.position).sqrMagnitude > ProposalRange * ProposalRange)
-            {
-                _incoming = null;
-                message = "The proposer is no longer nearby. The proposal expired.";
-                return false;
-            }
-
-            var responseText = accept
-                ? "I do!"
-                : "I do not.";
-            var package = new ZPackage();
-            package.Write(accept);
-            package.Write(localPlayer.GetPlayerName());
-            package.Write(responseText);
-            Plugin.ModLogger.LogInfo($"Sending marriage response from {localPlayer.GetPlayerName()} to peer {proposal.PeerId}: accepted={accept}.");
-            _responseRpc.SendPackage(proposal.PeerId, package);
-            _incoming = null;
-
-            if (accept)
-            {
-                EngagedPartnerId = proposal.PlayerId;
-                EngagedPartnerName = proposal.PlayerName;
-                PersistMarriage(localPlayer.GetPlayerID(), proposal.PlayerId);
-                message = $"You said ‘I do’ to {proposal.PlayerName}! You are engaged. Each of you can now craft a Wedding Ring for the other.";
-            }
-            else
-            {
-                message = $"You declined {proposal.PlayerName}'s proposal.";
-            }
-
-            return true;
-        }
-
-        private static IEnumerator RPC_ReceiveProposal(long senderPeerId, ZPackage package)
-        {
-            yield return null;
-            var proposerName = package.ReadString();
-            Plugin.ModLogger.LogInfo($"Marriage proposal RPC received from peer {senderPeerId} ({proposerName}).");
-            var localPlayer = Player.m_localPlayer;
-            if (localPlayer == null)
-            {
-                Plugin.ModLogger.LogWarning($"Received a marriage proposal from peer {senderPeerId}, but the local player is not ready.");
-                yield break;
-            }
-
-            if (EngagedPartnerId != 0)
-            {
-                SendResponse(senderPeerId, false, localPlayer.GetPlayerName(), "I cannot accept another proposal right now.");
-                yield break;
-            }
-
-            var proposer = FindPlayerByPeerId(senderPeerId);
-            if (proposer == null || (proposer.transform.position - localPlayer.transform.position).sqrMagnitude > ProposalRange * ProposalRange)
-            {
-                Plugin.ModLogger.LogWarning($"Received a marriage proposal from peer {senderPeerId}, but the proposer could not be found nearby.");
-                SendResponse(senderPeerId, false, localPlayer.GetPlayerName(), "The proposer is no longer nearby.");
-                yield break;
-            }
-
-            if (_incoming != null && Time.time < _incoming.ExpiresAt)
-            {
-                SendResponse(senderPeerId, false, localPlayer.GetPlayerName(), "I already have another proposal waiting for an answer.");
-                ShowMessage("You already have another proposal waiting for an answer.");
-                yield break;
-            }
-
-            var proposerPlayerId = proposer.GetPlayerID();
-            _incoming = new PendingProposal(proposerPlayerId, proposerName, senderPeerId, Time.time + ProposalLifetime);
-            Plugin.ModLogger.LogInfo($"Received marriage proposal from {proposerName} (peer {senderPeerId}).");
-            ShowMessage($"{proposerName} asks: ‘Will you marry me?’ Answer with /i_do or /i_do_not within two minutes.");
-        }
-
-        private static IEnumerator RPC_ReceiveResponse(long senderPeerId, ZPackage package)
-        {
-            yield return null;
-            var accepted = package.ReadBool();
-            var responderName = package.ReadString();
-            var responseText = package.ReadString();
-            Plugin.ModLogger.LogInfo($"Marriage response RPC received from peer {senderPeerId} ({responderName}), accepted={accepted}.");
-            if (_outgoing == null || Time.time >= _outgoing.ExpiresAt || _outgoing.PeerId != senderPeerId)
-            {
-                Plugin.ModLogger.LogWarning($"Ignoring marriage response from unexpected peer {senderPeerId}; expected {(_outgoing == null ? "no peer" : _outgoing.PeerId.ToString())}.");
-                yield break;
-            }
-
-            var proposal = _outgoing;
-            _outgoing = null;
-            if (!accepted)
-            {
-                ShowMessage($"{responderName} replied: ‘{responseText}’");
-                yield break;
-            }
-
-            EngagedPartnerId = proposal.PlayerId;
-            EngagedPartnerName = responderName;
-            var localPlayer = Player.m_localPlayer;
-            if (localPlayer != null)
-            {
-                PersistMarriage(localPlayer.GetPlayerID(), proposal.PlayerId);
-            }
-            ShowMessage($"{responderName} said ‘I do’! You are engaged. Each of you can now craft a Wedding Ring for the other.");
-        }
-
-        private static void SendResponse(long peerId, bool accepted, string playerName, string responseText)
-        {
-            if (_responseRpc == null)
-            {
-                Plugin.ModLogger.LogError("Cannot send marriage response: the Jotunn RPC is not registered.");
-                return;
-            }
-
-            var package = new ZPackage();
-            package.Write(accepted);
-            package.Write(playerName);
-            package.Write(responseText);
-            _responseRpc.SendPackage(peerId, package);
-        }
-
-        private static Player FindPlayer(long playerId)
-        {
-            return Player.GetAllPlayers().FirstOrDefault(player => player != null && player.GetPlayerID() == playerId);
-        }
-
-        private static Player FindPlayerByPeerId(long peerId)
-        {
-            return Player.GetAllPlayers().FirstOrDefault(player => player != null && player.GetZDOID().UserID == peerId);
-        }
-
-        internal static void ClearEngagement()
-        {
-            EngagedPartnerId = 0;
-            EngagedPartnerName = string.Empty;
-            _incoming = null;
-            _outgoing = null;
-        }
-
-        internal static void ShowMessage(string text)
-        {
-            if (MessageHud.instance != null)
-            {
-                MessageHud.instance.ShowMessage(MessageHud.MessageType.Center, text);
-            }
-
-            if (Chat.instance != null)
-            {
-                Chat.instance.AddString(text);
-            }
+            Plugin.ModLogger.LogInfo($"Saved marriage pair {first}/{second} in the world save.");
         }
 
         // Server only: drop confirmations whose partner never answered and tell whoever did confirm.
+        // Held in memory on purpose: both partners confirm within seconds of each other, and the client
+        // side gives up on its own if the server restarts in between.
         internal static void PurgeExpiredMarriages()
         {
             if (PendingMarriages.Count == 0) return;
@@ -445,24 +488,22 @@ namespace WeddingTime
             foreach (var entry in PendingMarriages.Where(pair => now - pair.Value.CreatedAt > ProposalLifetime + 30f).ToList())
             {
                 PendingMarriages.Remove(entry.Key);
-                var ids = entry.Key.Split('_');
-                if (ids.Length != 2 || !long.TryParse(ids[0], out var first) || !long.TryParse(ids[1], out var second)) continue;
+                if (!WeddingKeys.TryParsePairKey(entry.Key, out var first, out var second)) continue;
 
                 foreach (var confirmedId in entry.Value.Confirmed)
                 {
-                    var partnerId = confirmedId == first ? second : first;
-                    NotifyMarriageRejected(confirmedId, partnerId, "your partner did not confirm in time.");
+                    NotifyMarriageRejected(confirmedId, confirmedId == first ? second : first, "reason_timeout");
                 }
             }
         }
 
         // Server only: tell a client its optimistic engagement was not accepted.
-        private static void NotifyMarriageRejected(long playerId, long partnerId, string reason)
+        private static void NotifyMarriageRejected(long playerId, long partnerId, string reasonKey)
         {
             var localPlayer = Player.m_localPlayer;
             if (localPlayer != null && localPlayer.GetPlayerID() == playerId)
             {
-                HandleMarriageRejected(partnerId, reason);
+                HandleMarriageRejected(partnerId, reasonKey);
                 return;
             }
 
@@ -470,7 +511,7 @@ namespace WeddingTime
 
             var package = new ZPackage();
             package.Write(partnerId);
-            package.Write(reason);
+            package.Write(reasonKey);
             _marriageRejectedRpc.SendPackage(peerId, package);
         }
 
@@ -488,8 +529,8 @@ namespace WeddingTime
             try
             {
                 var partnerId = package.ReadLong();
-                var reason = package.ReadString();
-                HandleMarriageRejected(partnerId, reason);
+                var reasonKey = package.ReadString();
+                HandleMarriageRejected(partnerId, reasonKey);
             }
             catch (Exception exception)
             {
@@ -497,13 +538,13 @@ namespace WeddingTime
             }
         }
 
-        private static void HandleMarriageRejected(long partnerId, string reason)
+        private static void HandleMarriageRejected(long partnerId, string reasonKey)
         {
-            if (EngagedPartnerId != partnerId) return;
+            // A confirmed marriage is never undone by a late rejection; only the pending engagement is.
+            if (EngagedPartnerId != partnerId || _awaitingConfirmationSince <= 0f) return;
 
-            EngagedPartnerId = 0;
-            EngagedPartnerName = string.Empty;
-            ShowMessage($"The marriage could not be completed: {reason}");
+            EndMarriageLocally();
+            WeddingText.Show(WeddingText.T("marriage_failed", WeddingText.KeyArg(reasonKey)));
         }
 
         private sealed class PendingMarriage
@@ -518,11 +559,6 @@ namespace WeddingTime
             internal readonly long PeerId;
             internal readonly string PlayerName;
             internal readonly float ExpiresAt;
-
-            internal PendingProposal(long playerId, string playerName, float expiresAt)
-                : this(playerId, playerName, playerId, expiresAt)
-            {
-            }
 
             internal PendingProposal(long playerId, string playerName, long peerId, float expiresAt)
             {
